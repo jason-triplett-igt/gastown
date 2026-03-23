@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/acp"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -40,12 +41,107 @@ type MayorStatus struct {
 	Mode    Mode
 	Tmux    *tmux.SessionInfo
 	ACPPid  int
+	State   string
 	Running bool // Deprecated: use Active
 }
 
 // Manager handles mayor lifecycle operations.
 type Manager struct {
 	townRoot string
+	adapter  runtime.SessionAdapter
+}
+
+func (m *Manager) sessionAdapter() runtime.SessionAdapter {
+	if m.adapter != nil {
+		return m.adapter
+	}
+	adapter := runtime.NewTmuxSessionAdapter(tmux.NewTmux())
+	return adapter.WithBindingStore(runtime.NewFileSessionBindingStore(m.townRoot))
+}
+
+func (m *Manager) loadMayorBinding() (*runtime.SessionBinding, error) {
+	store := runtime.NewFileSessionBindingStore(m.townRoot)
+	binding, err := store.Load(context.Background(), "", "mayor", "", "mayor")
+	if err != nil {
+		return nil, fmt.Errorf("loading mayor binding: %w", err)
+	}
+	return binding, nil
+}
+
+func (m *Manager) deleteMayorBinding() error {
+	binding, err := m.loadMayorBinding()
+	if err != nil {
+		return err
+	}
+	if binding == nil {
+		return nil
+	}
+	store := runtime.NewFileSessionBindingStore(m.townRoot)
+	if err := store.Delete(context.Background(), binding.IssueID, binding.Role, binding.RigName, binding.AgentName); err != nil {
+		return fmt.Errorf("deleting mayor binding: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) markMayorStopping() error {
+	binding, err := m.loadMayorBinding()
+	if err != nil {
+		return err
+	}
+	if binding == nil {
+		return nil
+	}
+	binding.LifecycleState = runtime.SessionLifecycleStopping
+	binding.UpdatedAt = time.Now().UTC()
+	store := runtime.NewFileSessionBindingStore(m.townRoot)
+	if err := store.Save(context.Background(), *binding); err != nil {
+		return fmt.Errorf("saving mayor binding: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) lookupManagedSession(sessionName string) (runtime.ManagedSession, error) {
+	binding, err := m.loadMayorBinding()
+	if err != nil {
+		return nil, err
+	}
+	if binding == nil || binding.SessionName != sessionName || binding.RuntimeSessionID == "" {
+		return nil, nil
+	}
+	return m.sessionAdapter().Lookup(context.Background(), runtime.SessionLookupRequest{
+		SessionID:   binding.RuntimeSessionID,
+		Provider:    binding.Provider,
+		IssueID:     binding.IssueID,
+		SessionName: binding.SessionName,
+		Role:        binding.Role,
+		TownRoot:    m.townRoot,
+		AgentName:   binding.AgentName,
+		WorkDir:     binding.WorkDir,
+		Metadata:    binding.Metadata,
+	})
+}
+
+func (m *Manager) lifecycleState() (string, error) {
+	binding, err := m.loadMayorBinding()
+	if err != nil || binding == nil {
+		return "", err
+	}
+	return binding.LifecycleState, nil
+}
+
+func (m *Manager) LifecycleState() (string, error) {
+	binding, bindErr := m.loadMayorBinding()
+	if bindErr == nil && binding != nil {
+		if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+			status, statusErr := managed.Status(context.Background())
+			return runtime.DeriveLifecycleState(binding, status.Alive, statusErr), nil
+		}
+		return runtime.DeriveLifecycleState(binding, false, fmt.Errorf("runtime status unavailable")), nil
+	}
+	if running, err := tmux.NewTmux().HasSession(m.SessionName()); err == nil && running {
+		return runtime.SessionLifecycleRunning, nil
+	}
+	return runtime.SessionLifecycleStopped, nil
 }
 
 // CombinedStatus returns the combined status of the mayor across all modes.
@@ -62,6 +158,15 @@ func (m *Manager) CombinedStatus() (*MayorStatus, error) {
 			status.Tmux = info
 			status.Active = true
 			status.Mode = ModeTMUX
+			status.State, _ = m.LifecycleState()
+		}
+	}
+	if !status.Active {
+		if state, err := m.LifecycleState(); err == nil && state != runtime.SessionLifecycleStopped {
+			status.Active = true
+			status.Mode = ModeTMUX
+			status.State = state
+			status.Tmux = &tmux.SessionInfo{Name: m.SessionName()}
 		}
 	}
 
@@ -324,6 +429,16 @@ func (m *Manager) StartACP(ctx context.Context, agentOverride, rigName string) e
 
 // Stop stops the mayor session.
 func (m *Manager) Stop() error {
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil && status.Alive {
+			_ = m.markMayorStopping()
+			if err := managed.Close(context.Background()); err != nil {
+				return err
+			}
+			return m.deleteMayorBinding()
+		}
+	}
 	t := tmux.NewTmux()
 	sessionID := m.SessionName()
 
@@ -350,12 +465,33 @@ func (m *Manager) Stop() error {
 
 // IsRunning checks if the mayor session is active in TMUX mode.
 func (m *Manager) IsRunning() (bool, error) {
+	if state, err := m.lifecycleState(); err == nil && state == runtime.SessionLifecycleStopping {
+		return false, nil
+	}
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil {
+			return status.Alive, nil
+		}
+	}
 	t := tmux.NewTmux()
 	return t.HasSession(m.SessionName())
 }
 
 // Status returns information about the mayor session.
 func (m *Manager) Status() (*tmux.SessionInfo, error) {
+	if state, err := m.lifecycleState(); err == nil && state == runtime.SessionLifecycleStopping {
+		return &tmux.SessionInfo{Name: m.SessionName()}, nil
+	}
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil {
+			if !status.Alive {
+				return nil, ErrNotRunning
+			}
+			return &tmux.SessionInfo{Name: m.SessionName()}, nil
+		}
+	}
 	t := tmux.NewTmux()
 	sessionID := m.SessionName()
 

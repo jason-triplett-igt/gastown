@@ -685,6 +685,10 @@ type RuntimeConfig struct {
 	// Known values: "claude", "codex", "generic". Default: "claude".
 	Provider string `json:"provider,omitempty"`
 
+	// CLIURL is the URL of an existing external runtime server to connect to.
+	// This is primarily used for Copilot CLI headless server mode.
+	CLIURL string `json:"cli_url,omitempty"`
+
 	// Command is the CLI command to invoke (e.g., "claude", "aider").
 	// Default: "claude"
 	Command string `json:"command,omitempty"`

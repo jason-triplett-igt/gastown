@@ -1,6 +1,8 @@
 package refinery
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -8,10 +10,51 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/testutil"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+type fakeRuntimeStarter struct {
+	requests  []runtime.SessionLaunchRequest
+	lookupReq *runtime.SessionLookupRequest
+	session   runtime.ManagedSession
+	err       error
+}
+
+func (f *fakeRuntimeStarter) Start(_ context.Context, req runtime.SessionLaunchRequest) (runtime.ManagedSession, error) {
+	f.requests = append(f.requests, req)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.session, nil
+}
+
+func (f *fakeRuntimeStarter) Lookup(_ context.Context, req runtime.SessionLookupRequest) (runtime.ManagedSession, error) {
+	f.lookupReq = &req
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.session, nil
+}
+
+type fakeManagedSession struct {
+	status runtime.SessionStatus
+	closed bool
+}
+
+func (f *fakeManagedSession) ID() string { return f.status.SessionID }
+func (f *fakeManagedSession) Status(context.Context) (runtime.SessionStatus, error) {
+	return f.status, nil
+}
+func (f *fakeManagedSession) Send(context.Context, string) error { return nil }
+func (f *fakeManagedSession) Close(context.Context) error {
+	f.closed = true
+	return nil
+}
 
 func setupTestRegistry(t *testing.T) {
 	t.Helper()
@@ -85,6 +128,258 @@ func TestManager_Status_NotRunning(t *testing.T) {
 	t.Logf("Status returned error (expected): %v", err)
 }
 
+func TestManager_StartUsesAdapterForNonClaudeRoleConfig(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	refineryRigDir := filepath.Join(rigPath, "refinery", "rig")
+	if err := os.MkdirAll(refineryRigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := config.NewRigSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{
+		"copilot-external": {
+			Provider: "copilot",
+			Command:  "copilot",
+			CLIURL:   "http://127.0.0.1:4321",
+		},
+	}
+	settings.RoleAgents = map[string]string{"refinery": "copilot-external"}
+	if err := config.SaveRigSettings(filepath.Join(rigPath, "settings", "config.json"), settings); err != nil {
+		t.Fatalf("SaveRigSettings() error = %v", err)
+	}
+	adapter := &fakeRuntimeStarter{}
+	mgr.adapter = adapter
+
+	if err := mgr.Start(false, ""); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if len(adapter.requests) != 1 {
+		t.Fatalf("adapter requests = %#v, want 1", adapter.requests)
+	}
+	request := adapter.requests[0]
+	if request.Role != "refinery" || request.RigName != "testrig" {
+		t.Fatalf("request = %#v", request)
+	}
+	if request.IssueID != mgr.SessionName() {
+		t.Fatalf("IssueID = %q, want %q", request.IssueID, mgr.SessionName())
+	}
+	if request.WorkDir != refineryRigDir {
+		t.Fatalf("WorkDir = %q, want %q", request.WorkDir, refineryRigDir)
+	}
+	if request.Env["GT_REFINERY"] != "1" {
+		t.Fatalf("Env = %#v, want GT_REFINERY=1", request.Env)
+	}
+}
+
+func TestManager_IsRunningUsesManagedRefineryBinding(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	binding := runtime.SessionBinding{
+		IssueID:          mgr.SessionName(),
+		Role:             "refinery",
+		RigName:          "testrig",
+		AgentName:        "refinery",
+		Provider:         "copilot-external",
+		SessionName:      mgr.SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		WorkDir:          filepath.Join(rigPath, "refinery", "rig"),
+	}
+	store := runtime.NewFileSessionBindingStore(filepath.Dir(rigPath))
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &fakeRuntimeStarter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: true}}}
+	mgr.adapter = adapter
+
+	running, err := mgr.IsRunning()
+	if err != nil {
+		t.Fatalf("IsRunning() error = %v", err)
+	}
+	if !running {
+		t.Fatal("IsRunning() = false, want true")
+	}
+	if adapter.lookupReq == nil || adapter.lookupReq.SessionID != "runtime-xyz" {
+		t.Fatalf("lookupReq = %#v", adapter.lookupReq)
+	}
+}
+
+func TestManager_LifecycleStateReportsStoppingFromBinding(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	binding := runtime.SessionBinding{
+		IssueID:          mgr.SessionName(),
+		Role:             "refinery",
+		RigName:          "testrig",
+		AgentName:        "refinery",
+		Provider:         "copilot-external",
+		SessionName:      mgr.SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleStopping,
+		WorkDir:          filepath.Join(rigPath, "refinery", "rig"),
+	}
+	store := runtime.NewFileSessionBindingStore(filepath.Dir(rigPath))
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := mgr.LifecycleState()
+	if err != nil {
+		t.Fatalf("LifecycleState() error = %v", err)
+	}
+	if state != runtime.SessionLifecycleStopping {
+		t.Fatalf("LifecycleState() = %q, want stopping", state)
+	}
+	running, err := mgr.IsRunning()
+	if err != nil {
+		t.Fatalf("IsRunning() error = %v", err)
+	}
+	if running {
+		t.Fatal("IsRunning() = true, want false while stopping")
+	}
+}
+
+func TestManager_LifecycleStateReportsStartingForFreshBindingWithoutLookup(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	binding := runtime.SessionBinding{
+		IssueID:          mgr.SessionName(),
+		Role:             "refinery",
+		RigName:          "testrig",
+		AgentName:        "refinery",
+		Provider:         "copilot-external",
+		SessionName:      mgr.SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleStarting,
+		UpdatedAt:        time.Now().UTC(),
+		WorkDir:          filepath.Join(rigPath, "refinery", "rig"),
+	}
+	store := runtime.NewFileSessionBindingStore(filepath.Dir(rigPath))
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	mgr.adapter = &fakeRuntimeStarter{err: fmt.Errorf("lookup unavailable")}
+
+	state, err := mgr.LifecycleState()
+	if err != nil {
+		t.Fatalf("LifecycleState() error = %v", err)
+	}
+	if state != runtime.SessionLifecycleStarting {
+		t.Fatalf("LifecycleState() = %q, want starting", state)
+	}
+}
+
+func TestManager_LifecycleStateReportsUnknownForStaleBindingWithoutLookup(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	binding := runtime.SessionBinding{
+		IssueID:          mgr.SessionName(),
+		Role:             "refinery",
+		RigName:          "testrig",
+		AgentName:        "refinery",
+		Provider:         "copilot-external",
+		SessionName:      mgr.SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleStarting,
+		UpdatedAt:        time.Now().UTC().Add(-2 * runtime.SessionLifecycleStartingGrace),
+		WorkDir:          filepath.Join(rigPath, "refinery", "rig"),
+	}
+	store := runtime.NewFileSessionBindingStore(filepath.Dir(rigPath))
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	mgr.adapter = &fakeRuntimeStarter{err: fmt.Errorf("lookup unavailable")}
+
+	state, err := mgr.LifecycleState()
+	if err != nil {
+		t.Fatalf("LifecycleState() error = %v", err)
+	}
+	if state != runtime.SessionLifecycleUnknown {
+		t.Fatalf("LifecycleState() = %q, want unknown", state)
+	}
+}
+
+func TestManager_StatusUsesManagedRefineryBinding(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	binding := runtime.SessionBinding{
+		IssueID:          mgr.SessionName(),
+		Role:             "refinery",
+		RigName:          "testrig",
+		AgentName:        "refinery",
+		Provider:         "copilot-external",
+		SessionName:      mgr.SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		WorkDir:          filepath.Join(rigPath, "refinery", "rig"),
+	}
+	store := runtime.NewFileSessionBindingStore(filepath.Dir(rigPath))
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &fakeRuntimeStarter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: true}}}
+	mgr.adapter = adapter
+
+	info, err := mgr.Status()
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if info == nil || info.Name != mgr.SessionName() {
+		t.Fatalf("Status() = %#v, want session info for %s", info, mgr.SessionName())
+	}
+}
+
+func TestManager_StopUsesManagedRefineryBinding(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	managed := &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: true}}
+	binding := runtime.SessionBinding{
+		IssueID:          mgr.SessionName(),
+		Role:             "refinery",
+		RigName:          "testrig",
+		AgentName:        "refinery",
+		Provider:         "copilot-external",
+		SessionName:      mgr.SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		WorkDir:          filepath.Join(rigPath, "refinery", "rig"),
+	}
+	store := runtime.NewFileSessionBindingStore(filepath.Dir(rigPath))
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &fakeRuntimeStarter{session: managed}
+	mgr.adapter = adapter
+
+	if err := mgr.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if !managed.closed {
+		t.Fatal("managed session was not closed")
+	}
+	stopping, err := store.Load(context.Background(), binding.IssueID, binding.Role, binding.RigName, binding.AgentName)
+	if err != nil {
+		t.Fatalf("Load() during stop error = %v", err)
+	}
+	if stopping != nil {
+		t.Fatalf("binding still exists after stop: %#v", stopping)
+	}
+}
+
+func TestManager_IsHealthyUsesManagedRefineryBinding(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	binding := runtime.SessionBinding{
+		IssueID:          mgr.SessionName(),
+		Role:             "refinery",
+		RigName:          "testrig",
+		AgentName:        "refinery",
+		Provider:         "copilot-external",
+		SessionName:      mgr.SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		WorkDir:          filepath.Join(rigPath, "refinery", "rig"),
+	}
+	store := runtime.NewFileSessionBindingStore(filepath.Dir(rigPath))
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &fakeRuntimeStarter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: true}}}
+	mgr.adapter = adapter
+
+	if got := mgr.IsHealthy(time.Minute); got != tmux.SessionHealthy {
+		t.Fatalf("IsHealthy() = %v, want %v", got, tmux.SessionHealthy)
+	}
+}
+
 func TestManager_Queue_NoBeads(t *testing.T) {
 	mgr, _ := setupTestManager(t)
 
@@ -110,14 +405,14 @@ func TestManager_Queue_FiltersClosedMergeRequests(t *testing.T) {
 	}
 
 	openIssue, err := b.Create(beads.CreateOptions{
-		Title: "Open MR",
+		Title:  "Open MR",
 		Labels: []string{"gt:merge-request"},
 	})
 	if err != nil {
 		t.Fatalf("create open merge-request issue: %v", err)
 	}
 	closedIssue, err := b.Create(beads.CreateOptions{
-		Title: "Closed MR",
+		Title:  "Closed MR",
 		Labels: []string{"gt:merge-request"},
 	})
 	if err != nil {
@@ -226,7 +521,7 @@ func TestManager_PostMerge_ClosesMRAndSourceIssue(t *testing.T) {
 
 	// Create a source issue
 	srcIssue, err := b.Create(beads.CreateOptions{
-		Title: "Implement feature X",
+		Title:  "Implement feature X",
 		Labels: []string{"gt:task"},
 	})
 	if err != nil {

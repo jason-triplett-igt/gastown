@@ -1801,6 +1801,33 @@ func TestResolveRoleAgentConfigFromRigSettings(t *testing.T) {
 	}
 }
 
+func TestResolveRoleAgentConfigPreservesCLIURL(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "myrig")
+	settingsDir := filepath.Join(rigPath, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("creating settings dir: %v", err)
+	}
+
+	settings := NewRigSettings()
+	settings.Agents = map[string]*RuntimeConfig{"copilot-external": {
+		Command:  "copilot",
+		Provider: "copilot",
+		Args:     []string{"--yolo"},
+		CLIURL:   "localhost:4321",
+	}}
+	settings.RoleAgents = map[string]string{"polecat": "copilot-external"}
+	if err := SaveRigSettings(filepath.Join(settingsDir, "config.json"), settings); err != nil {
+		t.Fatalf("saving settings: %v", err)
+	}
+
+	rc := ResolveRoleAgentConfig("polecat", townRoot, rigPath)
+	if rc.CLIURL != "localhost:4321" {
+		t.Fatalf("CLIURL = %q, want %q", rc.CLIURL, "localhost:4321")
+	}
+}
+
 func TestResolveRoleAgentConfigFallsBackToDefaults(t *testing.T) {
 	t.Parallel()
 	// Non-existent paths should use defaults

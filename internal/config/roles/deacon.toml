@@ -5,6 +5,9 @@ role = "deacon"
 scope = "town"
 nudge = "Run 'gt prime' to check patrol status and begin heartbeat cycle."
 prompt_template = "deacon.md.tmpl"
+profile = "orchestrator"
+hook_policy = "orchestrator"
+allowed_tools = ["bd_show", "bd_ready", "bd_update", "bd_create", "send_mail"]
 
 [session]
 pattern = "hq-deacon"

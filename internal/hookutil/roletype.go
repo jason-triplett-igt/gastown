@@ -1,22 +1,32 @@
 // Package hookutil provides shared utilities for agent hook installers.
 package hookutil
 
-import "github.com/steveyegge/gastown/internal/constants"
+import (
+	"github.com/steveyegge/gastown/internal/config"
+)
 
-// IsAutonomousRole returns true if the given role operates without human
-// prompting and needs automatic mail injection on startup.
-//
-// Autonomous roles: polecat, witness, refinery, deacon, boot.
-// Interactive roles: mayor, crew (and anything else).
-//
-// This is the single source of truth for the autonomous/interactive
-// classification used by all hook installer packages (claude, gemini,
-// cursor, etc.) and the runtime fallback logic.
+// IsAutonomousRole reports whether a role's hook policy maps to autonomous
+// startup behavior with the current compatibility templates.
 func IsAutonomousRole(role string) bool {
-	switch role {
-	case constants.RolePolecat, constants.RoleWitness, constants.RoleRefinery, constants.RoleDeacon, "boot":
+	switch HookPolicyForRole("", "", role) {
+	case "builder", "reviewer":
 		return true
 	default:
 		return false
 	}
+}
+
+func HookPolicyForRole(townRoot, rigPath, role string) string {
+	if role == "boot" {
+		return "builder"
+	}
+	policy := config.RoleHookPolicy(townRoot, rigPath, role)
+	if policy != "" {
+		return policy
+	}
+	return "orchestrator"
+}
+
+func HookPolicyFromWorkDir(_ string, role string) string {
+	return HookPolicyForRole("", "", role)
 }

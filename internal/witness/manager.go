@@ -2,6 +2,7 @@ package witness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -19,8 +20,14 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/toolcallbacks"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+type runtimeSessionStarter interface {
+	Start(context.Context, runtime.SessionLaunchRequest) (runtime.ManagedSession, error)
+	Lookup(context.Context, runtime.SessionLookupRequest) (runtime.ManagedSession, error)
+}
 
 // Common errors
 var (
@@ -31,7 +38,20 @@ var (
 // Manager handles witness lifecycle and monitoring operations.
 // ZFC-compliant: tmux session is the source of truth for running state.
 type Manager struct {
-	rig *rig.Rig
+	rig     *rig.Rig
+	adapter runtimeSessionStarter
+}
+
+type ReviewSessionScope struct {
+	IssueID           string   `json:"issue_id"`
+	IssueTitle        string   `json:"issue_title,omitempty"`
+	Phase             string   `json:"phase,omitempty"`
+	AllowedTools      []string `json:"allowed_tools,omitempty"`
+	ApprovedArtifacts []string `json:"approved_artifacts,omitempty"`
+	ReviewArtifactID  string   `json:"review_artifact_id,omitempty"`
+	BuilderSession    string   `json:"builder_session,omitempty"`
+	FreshContext      bool     `json:"fresh_context"`
+	ReadOnly          bool     `json:"read_only"`
 }
 
 // NewManager creates a new witness manager for a rig.
@@ -41,12 +61,279 @@ func NewManager(r *rig.Rig) *Manager {
 	}
 }
 
+func (m *Manager) sessionAdapter() runtimeSessionStarter {
+	if m.adapter != nil {
+		return m.adapter
+	}
+	adapter := runtime.NewTmuxSessionAdapter(tmux.NewTmux())
+	return adapter.WithBindingStore(runtime.NewFileSessionBindingStore(m.townRoot()))
+}
+
+func (m *Manager) loadWitnessBinding() (*runtime.SessionBinding, error) {
+	if m == nil || m.rig == nil {
+		return nil, fmt.Errorf("rig is required")
+	}
+	store := runtime.NewFileSessionBindingStore(m.townRoot())
+	binding, err := store.Load(context.Background(), "", "witness", m.rig.Name, "witness")
+	if err != nil {
+		return nil, fmt.Errorf("loading witness binding: %w", err)
+	}
+	return binding, nil
+}
+
+func (m *Manager) lookupManagedSession(sessionName string) (runtime.ManagedSession, error) {
+	binding, err := m.loadWitnessBinding()
+	if err != nil {
+		return nil, err
+	}
+	if binding == nil || binding.SessionName != sessionName || binding.RuntimeSessionID == "" {
+		return nil, nil
+	}
+	return m.sessionAdapter().Lookup(context.Background(), runtime.SessionLookupRequest{
+		SessionID:   binding.RuntimeSessionID,
+		Provider:    binding.Provider,
+		IssueID:     binding.IssueID,
+		SessionName: binding.SessionName,
+		Role:        binding.Role,
+		TownRoot:    m.townRoot(),
+		RigName:     m.rig.Name,
+		RigPath:     m.rig.Path,
+		AgentName:   binding.AgentName,
+		WorkDir:     binding.WorkDir,
+		Metadata:    binding.Metadata,
+	})
+}
+
+func (m *Manager) deleteWitnessBinding() error {
+	binding, err := m.loadWitnessBinding()
+	if err != nil {
+		return err
+	}
+	if binding == nil {
+		return nil
+	}
+	store := runtime.NewFileSessionBindingStore(m.townRoot())
+	if err := store.Delete(context.Background(), binding.IssueID, binding.Role, binding.RigName, binding.AgentName); err != nil {
+		return fmt.Errorf("deleting witness binding: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) saveWitnessBinding(binding runtime.SessionBinding) error {
+	store := runtime.NewFileSessionBindingStore(m.townRoot())
+	if err := store.Save(context.Background(), binding); err != nil {
+		return fmt.Errorf("saving witness binding: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) markWitnessStopping() error {
+	binding, err := m.loadWitnessBinding()
+	if err != nil {
+		return err
+	}
+	if binding == nil {
+		return nil
+	}
+	binding.LifecycleState = runtime.SessionLifecycleStopping
+	binding.UpdatedAt = time.Now().UTC()
+	return m.saveWitnessBinding(*binding)
+}
+
+func (m *Manager) lifecycleState() (string, error) {
+	binding, err := m.loadWitnessBinding()
+	if err != nil || binding == nil {
+		return "", err
+	}
+	return binding.LifecycleState, nil
+}
+
+// LifecycleState returns the current witness lifecycle state.
+func (m *Manager) LifecycleState() (string, error) {
+	binding, bindErr := m.loadWitnessBinding()
+	if bindErr == nil && binding != nil {
+		if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+			status, statusErr := managed.Status(context.Background())
+			return runtime.DeriveLifecycleState(binding, status.Alive, statusErr), nil
+		}
+		return runtime.DeriveLifecycleState(binding, false, fmt.Errorf("runtime status unavailable")), nil
+	}
+	if tmux.NewTmux().CheckSessionHealth(m.SessionName(), 0) == tmux.SessionHealthy {
+		return runtime.SessionLifecycleRunning, nil
+	}
+	return runtime.SessionLifecycleStopped, nil
+}
+
+func (m *Manager) LaunchReviewSession(issueID string, workDir string, agentOverride string) (*runtime.SessionLaunchRequest, error) {
+	if issueID == "" {
+		return nil, fmt.Errorf("issue id is required")
+	}
+	townRoot := m.townRoot()
+	if workDir == "" {
+		workDir = m.witnessDir()
+	}
+	scope, err := m.BuildReviewSessionScope(issueID, workDir)
+	if err != nil {
+		return nil, err
+	}
+	scopeJSON, err := json.Marshal(scope)
+	if err != nil {
+		return nil, fmt.Errorf("encoding review scope: %w", err)
+	}
+	sessionID := reviewSessionName(session.PrefixFor(m.rig.Name), issueID)
+	startupPrompt := session.BuildStartupPrompt(session.BeaconConfig{
+		Recipient: session.BeaconRecipient("witness", "review", m.rig.Name),
+		Sender:    "mayor",
+		Topic:     "review",
+		MolID:     issueID,
+	}, buildReviewInstructions(scope))
+	request := &runtime.SessionLaunchRequest{
+		Provider:    agentOverride,
+		IssueID:     issueID,
+		SessionName: sessionID,
+		Role:        "witness",
+		SessionKind: config.ToolSessionKindReview,
+		TownRoot:    townRoot,
+		RigName:     m.rig.Name,
+		RigPath:     m.rig.Path,
+		AgentName:   "review",
+		WorkDir:     workDir,
+		Prompt:      startupPrompt,
+		Env: map[string]string{
+			"GT_REVIEW_SCOPE": string(scopeJSON),
+		},
+		Metadata: map[string]string{
+			"session_kind":    "review",
+			"fresh_context":   "true",
+			"read_only":       "true",
+			"artifact_scope":  strings.Join(scope.ApprovedArtifacts, ","),
+			"allowed_tools":   strings.Join(scope.AllowedTools, ","),
+			"builder_session": scope.BuilderSession,
+		},
+		AcceptStartupDialogs: true,
+		ToolPolicy:           toolPolicyPtr(config.LegacyToolPolicy(workDir, scope.AllowedTools, true)),
+		ToolCallbacks:        toolcallbacks.ForTown(townRoot, workDir),
+	}
+	if _, err := m.sessionAdapter().Start(context.Background(), *request); err != nil {
+		return nil, fmt.Errorf("starting review runtime session: %w", err)
+	}
+	return request, nil
+}
+
+func (m *Manager) BuildReviewSessionScope(issueID string, workDir string) (*ReviewSessionScope, error) {
+	if issueID == "" {
+		return nil, fmt.Errorf("issue id is required")
+	}
+	if workDir == "" {
+		workDir = m.witnessDir()
+	}
+	b := beads.New(workDir)
+	issue, err := b.Show(issueID)
+	if err != nil {
+		return nil, fmt.Errorf("loading review issue: %w", err)
+	}
+	inspection := beads.InspectVSDDWorkflow(issue)
+	if inspection == nil {
+		return nil, fmt.Errorf("issue %s has no vsdd workflow state", issueID)
+	}
+	artifacts := beads.ParseVSDDArtifactFields(issue)
+	if artifacts == nil {
+		artifacts = &beads.VSDDArtifactFields{}
+	}
+	scope := &ReviewSessionScope{
+		IssueID:           issueID,
+		IssueTitle:        issue.Title,
+		Phase:             string(inspection.Phase),
+		AllowedTools:      config.RoleAllowedTools(m.townRoot(), m.rig.Path, "witness"),
+		ApprovedArtifacts: approvedArtifactIDs(*artifacts),
+		ReviewArtifactID:  artifacts.ReviewArtifactID,
+		FreshContext:      true,
+		ReadOnly:          true,
+	}
+	scope.BuilderSession = findBoundSessionName(m.townRoot(), issueID, "polecat")
+	return scope, nil
+}
+
+func findBoundSessionName(townRoot, issueID, role string) string {
+	entries, err := os.ReadDir(filepath.Join(townRoot, ".runtime", "session-bindings"))
+	if err != nil {
+		return ""
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(townRoot, ".runtime", "session-bindings", entry.Name()))
+		if readErr != nil {
+			continue
+		}
+		var binding runtime.SessionBinding
+		if json.Unmarshal(data, &binding) == nil && binding.IssueID == issueID && binding.Role == role {
+			return binding.SessionName
+		}
+	}
+	return ""
+}
+
+func approvedArtifactIDs(fields beads.VSDDArtifactFields) []string {
+	artifacts := make([]string, 0, 7)
+	appendIf := func(value string) {
+		if value != "" {
+			artifacts = append(artifacts, value)
+		}
+	}
+	appendIf(fields.SpecArtifactID)
+	appendIf(fields.SpecReviewArtifactID)
+	appendIf(fields.TestPlanArtifactID)
+	appendIf(fields.RedTestEvidenceID)
+	appendIf(fields.ImplementationArtifactID)
+	appendIf(fields.BuilderEvidenceID)
+	appendIf(fields.ReviewArtifactID)
+	return artifacts
+}
+
+func reviewSessionName(rigPrefix, issueID string) string {
+	return fmt.Sprintf("%s-review-%s", rigPrefix, sanitizeReviewSessionPart(issueID))
+}
+
+func sanitizeReviewSessionPart(value string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	replacer := strings.NewReplacer("/", "-", "\\", "-", ":", "-", " ", "-", "@", "-", ".", "-")
+	value = replacer.Replace(value)
+	for strings.Contains(value, "--") {
+		value = strings.ReplaceAll(value, "--", "-")
+	}
+	value = strings.Trim(value, "-")
+	if value == "" {
+		return "review"
+	}
+	return value
+}
+
+func buildReviewInstructions(scope *ReviewSessionScope) string {
+	artifacts := "none"
+	if len(scope.ApprovedArtifacts) > 0 {
+		artifacts = strings.Join(scope.ApprovedArtifacts, ", ")
+	}
+	tools := strings.Join(scope.AllowedTools, ", ")
+	return fmt.Sprintf("Review issue %s in fresh context only. Treat any prior builder conversation as non-evidence. Inspect only approved artifacts [%s]. Operate read-only and use only allowed reviewer tools [%s]. Record findings against the supplied evidence set.", scope.IssueID, artifacts, tools)
+}
+
 // IsRunning checks if the witness session is active and healthy.
 // Checks both tmux session existence AND agent process liveness to avoid
 // reporting zombie sessions (tmux alive but Claude dead) as "running".
 // ZFC: tmux session existence is the source of truth for session state,
 // but agent liveness determines if the session is actually functional.
 func (m *Manager) IsRunning() (bool, error) {
+	if state, err := m.lifecycleState(); err == nil && state == runtime.SessionLifecycleStopping {
+		return false, nil
+	}
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil {
+			return status.Alive, nil
+		}
+	}
 	t := tmux.NewTmux()
 	status := t.CheckSessionHealth(m.SessionName(), 0)
 	return status == tmux.SessionHealthy, nil
@@ -58,6 +345,9 @@ func (m *Manager) IsRunning() (bool, error) {
 // Returns the detailed ZombieStatus for callers that need to distinguish
 // between different failure modes.
 func (m *Manager) IsHealthy(maxInactivity time.Duration) tmux.ZombieStatus {
+	if state, err := m.lifecycleState(); err == nil && state == runtime.SessionLifecycleStopping {
+		return tmux.SessionDead
+	}
 	t := tmux.NewTmux()
 	return t.CheckSessionHealth(m.SessionName(), maxInactivity)
 }
@@ -70,6 +360,18 @@ func (m *Manager) SessionName() string {
 // Status returns information about the witness session.
 // ZFC-compliant: tmux session is the source of truth.
 func (m *Manager) Status() (*tmux.SessionInfo, error) {
+	if state, err := m.lifecycleState(); err == nil && state == runtime.SessionLifecycleStopping {
+		return &tmux.SessionInfo{Name: m.SessionName()}, nil
+	}
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil {
+			if !status.Alive {
+				return nil, ErrNotRunning
+			}
+			return &tmux.SessionInfo{Name: m.SessionName()}, nil
+		}
+	}
 	t := tmux.NewTmux()
 	sessionID := m.SessionName()
 
@@ -183,14 +485,43 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	if err != nil {
 		return err
 	}
+	initialPrompt := session.BuildStartupPrompt(session.BeaconConfig{
+		Recipient: session.BeaconRecipient("witness", "", m.rig.Name),
+		Sender:    "deacon",
+		Topic:     "patrol",
+	}, "Run `gt prime --hook` and begin patrol.")
 
 	// Generate the GASTA run ID for this witness session.
 	runID := uuid.New().String()
 
-	// Create session with command directly to avoid send-keys race condition.
-	// See: https://github.com/anthropics/gastown/issues/280
-	if err := t.NewSessionWithCommand(sessionID, witnessDir, command); err != nil {
-		return fmt.Errorf("creating tmux session: %w", err)
+	resolvedAgentUsesAdapter := agentOverride != "" || !config.IsResolvedAgentClaude(runtimeConfig)
+
+	// Use the runtime adapter for explicit agent overrides and non-Claude runtimes,
+	// including Copilot external. Keep the direct tmux path only for Claude-backed
+	// custom role launchers that rely on the historical start_command behavior.
+	if roleConfig != nil && roleConfig.StartCommand != "" && agentOverride == "" && !resolvedAgentUsesAdapter {
+		if err := t.NewSessionWithCommand(sessionID, witnessDir, command); err != nil {
+			return fmt.Errorf("creating tmux session: %w", err)
+		}
+	} else {
+		if _, err := m.sessionAdapter().Start(context.Background(), runtime.SessionLaunchRequest{
+			Provider:             agentOverride,
+			IssueID:              sessionID,
+			SessionName:          sessionID,
+			Role:                 "witness",
+			SessionKind:          config.ToolSessionKindPatrol,
+			TownRoot:             townRoot,
+			RigName:              m.rig.Name,
+			RigPath:              m.rig.Path,
+			AgentName:            "witness",
+			WorkDir:              witnessDir,
+			Prompt:               initialPrompt,
+			AcceptStartupDialogs: true,
+			ToolPolicy:           toolPolicyPtr(config.ResolveToolPolicyForSession(townRoot, m.rig.Path, "witness", config.ToolSessionKindPatrol, witnessDir)),
+			ToolCallbacks:        toolcallbacks.ForTown(townRoot, witnessDir),
+		}); err != nil {
+			return fmt.Errorf("starting witness runtime session: %w", err)
+		}
 	}
 
 	// Set environment variables (non-fatal: session works without these)
@@ -203,59 +534,68 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 		SessionName: sessionID,
 	})
 	envVars = session.MergeRuntimeLivenessEnv(envVars, runtimeConfig)
-	for k, v := range envVars {
-		_ = t.SetEnvironment(sessionID, k, v)
+	if !resolvedAgentUsesAdapter {
+		for k, v := range envVars {
+			_ = t.SetEnvironment(sessionID, k, v)
+		}
+		_ = t.SetEnvironment(sessionID, "GT_RUN", runID)
 	}
-	_ = t.SetEnvironment(sessionID, "GT_RUN", runID)
 	// Apply role config env vars if present (non-fatal).
 	// Skip keys already set by AgentEnv to prevent TOML env overriding
 	// the canonical qualified GT_ROLE (e.g., "gastown/witness" not "witness").
 	// See: https://github.com/steveyegge/gastown/issues/2492
-	for key, value := range roleConfigEnvVars(roleConfig, townRoot, m.rig.Name) {
-		if existing, alreadySet := envVars[key]; alreadySet {
-			log.Printf("witness env: skipping TOML %s=%q (AgentEnv already set %q)", key, value, existing)
-			continue
+	if !resolvedAgentUsesAdapter {
+		for key, value := range roleConfigEnvVars(roleConfig, townRoot, m.rig.Name) {
+			if existing, alreadySet := envVars[key]; alreadySet {
+				log.Printf("witness env: skipping TOML %s=%q (AgentEnv already set %q)", key, value, existing)
+				continue
+			}
+			_ = t.SetEnvironment(sessionID, key, value)
 		}
-		_ = t.SetEnvironment(sessionID, key, value)
 	}
 	// Apply CLI env overrides (highest priority, non-fatal).
-	for _, override := range envOverrides {
-		if key, value, ok := strings.Cut(override, "="); ok {
-			_ = t.SetEnvironment(sessionID, key, value)
+	if !resolvedAgentUsesAdapter {
+		for _, override := range envOverrides {
+			if key, value, ok := strings.Cut(override, "="); ok {
+				_ = t.SetEnvironment(sessionID, key, value)
+			}
 		}
 	}
 
 	// Apply Gas Town theming (non-fatal: theming failure doesn't affect operation)
-	theme := tmux.ResolveSessionTheme(townRoot, m.rig.Name, "witness")
-	_ = t.ConfigureGasTownSession(sessionID, theme, m.rig.Name, "witness", "witness")
-
-	// Wait for Claude to start - fatal if Claude fails to launch
-	if err := t.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
-		// Kill the zombie session before returning error
-		_ = t.KillSessionWithProcesses(sessionID)
-		return fmt.Errorf("waiting for witness to start: %w", err)
+	if !resolvedAgentUsesAdapter {
+		theme := tmux.ResolveSessionTheme(townRoot, m.rig.Name, "witness")
+		_ = t.ConfigureGasTownSession(sessionID, theme, m.rig.Name, "witness", "witness")
 	}
 
-	// Accept startup dialogs (workspace trust + bypass permissions) if they appear.
-	if err := t.AcceptStartupDialogs(sessionID); err != nil {
-		log.Printf("warning: accepting startup dialogs for %s: %v", sessionID, err)
+	if roleConfig != nil && roleConfig.StartCommand != "" && agentOverride == "" && !resolvedAgentUsesAdapter {
+		// Wait for Claude to start - fatal if Claude fails to launch
+		if err := t.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
+			// Kill the zombie session before returning error
+			_ = t.KillSessionWithProcesses(sessionID)
+			return fmt.Errorf("waiting for witness to start: %w", err)
+		}
+
+		// Accept startup dialogs (workspace trust + bypass permissions) if they appear.
+		if err := t.AcceptStartupDialogs(sessionID); err != nil {
+			log.Printf("warning: accepting startup dialogs for %s: %v", sessionID, err)
+		}
 	}
 
 	// Track PID for defense-in-depth orphan cleanup (non-fatal)
-	if err := session.TrackSessionPID(townRoot, sessionID, t); err != nil {
-		log.Printf("warning: tracking session PID for %s: %v", sessionID, err)
+	if !resolvedAgentUsesAdapter {
+		if err := session.TrackSessionPID(townRoot, sessionID, t); err != nil {
+			log.Printf("warning: tracking session PID for %s: %v", sessionID, err)
+		}
 	}
 
-	_ = runtime.RunStartupFallback(t, sessionID, "witness", runtimeConfig)
-	initialPrompt := session.BuildStartupPrompt(session.BeaconConfig{
-		Recipient: session.BeaconRecipient("witness", "", m.rig.Name),
-		Sender:    "deacon",
-		Topic:     "patrol",
-	}, "Run `gt prime --hook` and begin patrol.")
-	_ = runtime.DeliverStartupPromptFallback(t, sessionID, initialPrompt, runtimeConfig, constants.ClaudeStartTimeout)
+	if !resolvedAgentUsesAdapter {
+		_ = runtime.RunStartupFallback(t, sessionID, "witness", runtimeConfig)
+		_ = runtime.DeliverStartupPromptFallback(t, sessionID, initialPrompt, runtimeConfig, constants.ClaudeStartTimeout)
+	}
 
 	// Stream witness's Claude Code JSONL conversation log to VictoriaLogs (opt-in).
-	if os.Getenv("GT_LOG_AGENT_OUTPUT") == "true" && os.Getenv("GT_OTEL_LOGS_URL") != "" {
+	if !resolvedAgentUsesAdapter && os.Getenv("GT_LOG_AGENT_OUTPUT") == "true" && os.Getenv("GT_OTEL_LOGS_URL") != "" {
 		if err := session.ActivateAgentLogging(sessionID, witnessDir, runID); err != nil {
 			log.Printf("warning: agent log watcher setup failed for %s: %v", sessionID, err)
 		}
@@ -268,6 +608,10 @@ func (m *Manager) Start(foreground bool, agentOverride string, envOverrides []st
 	time.Sleep(constants.ShutdownNotifyDelay)
 
 	return nil
+}
+
+func toolPolicyPtr(policy config.ToolPolicy) *config.ToolPolicy {
+	return &policy
 }
 
 func (m *Manager) roleConfig() (*beads.RoleConfig, error) {
@@ -360,6 +704,16 @@ func isBuiltinClaudeStartCommand(cmd string) bool {
 // Stop stops the witness.
 // ZFC-compliant: tmux session is the source of truth.
 func (m *Manager) Stop() error {
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil && status.Alive {
+			_ = m.markWitnessStopping()
+			if err := managed.Close(context.Background()); err != nil {
+				return err
+			}
+			return m.deleteWitnessBinding()
+		}
+	}
 	t := tmux.NewTmux()
 	sessionID := m.SessionName()
 
@@ -370,5 +724,8 @@ func (m *Manager) Stop() error {
 	}
 
 	// Kill the tmux session
-	return t.KillSession(sessionID)
+	if err := t.KillSession(sessionID); err != nil {
+		return err
+	}
+	return m.deleteWitnessBinding()
 }

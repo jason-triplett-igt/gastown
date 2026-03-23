@@ -1,14 +1,60 @@
 package mayor
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
+
+type fakeRuntimeAdapter struct {
+	lookupReq *runtime.SessionLookupRequest
+	session   runtime.ManagedSession
+	err       error
+}
+
+func (f *fakeRuntimeAdapter) Start(context.Context, runtime.SessionLaunchRequest) (runtime.ManagedSession, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.session, nil
+}
+
+func (f *fakeRuntimeAdapter) Resume(context.Context, runtime.SessionResumeRequest) (runtime.ManagedSession, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.session, nil
+}
+
+func (f *fakeRuntimeAdapter) Lookup(_ context.Context, req runtime.SessionLookupRequest) (runtime.ManagedSession, error) {
+	f.lookupReq = &req
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.session, nil
+}
+
+type fakeManagedSession struct {
+	status runtime.SessionStatus
+	closed bool
+}
+
+func (f *fakeManagedSession) ID() string { return f.status.SessionID }
+func (f *fakeManagedSession) Status(context.Context) (runtime.SessionStatus, error) {
+	return f.status, nil
+}
+func (f *fakeManagedSession) Send(context.Context, string) error { return nil }
+func (f *fakeManagedSession) Close(context.Context) error {
+	f.closed = true
+	return nil
+}
 
 func TestNewManager(t *testing.T) {
 	m := NewManager("/tmp/test-town")
@@ -109,5 +155,102 @@ func TestGetMayorPrime_InvalidTownRoot(t *testing.T) {
 	// Should still have the template content
 	if !strings.Contains(content, "# Mayor Context") {
 		t.Error("GetMayorPrime should render mayor template even with invalid town root")
+	}
+}
+
+func TestMayorLifecycleStateReportsStartingFromFreshBinding(t *testing.T) {
+	townRoot := t.TempDir()
+	binding := runtime.SessionBinding{
+		IssueID:          SessionName(),
+		Role:             "mayor",
+		AgentName:        "mayor",
+		Provider:         "copilot-external",
+		SessionName:      SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleStarting,
+		UpdatedAt:        time.Now().UTC(),
+		WorkDir:          filepath.Join(townRoot, "mayor"),
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{townRoot: townRoot, adapter: &fakeRuntimeAdapter{err: context.DeadlineExceeded}}
+
+	state, err := m.LifecycleState()
+	if err != nil {
+		t.Fatalf("LifecycleState() error = %v", err)
+	}
+	if state != runtime.SessionLifecycleStarting {
+		t.Fatalf("LifecycleState() = %q, want starting", state)
+	}
+}
+
+func TestMayorCombinedStatusUsesManagedBindingAsTmuxMode(t *testing.T) {
+	townRoot := t.TempDir()
+	binding := runtime.SessionBinding{
+		IssueID:          SessionName(),
+		Role:             "mayor",
+		AgentName:        "mayor",
+		Provider:         "copilot-external",
+		SessionName:      SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleRunning,
+		UpdatedAt:        time.Now().UTC(),
+		WorkDir:          filepath.Join(townRoot, "mayor"),
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{townRoot: townRoot, adapter: &fakeRuntimeAdapter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: true}}}}
+
+	status, err := m.CombinedStatus()
+	if err != nil {
+		t.Fatalf("CombinedStatus() error = %v", err)
+	}
+	if !status.Active || status.Mode != ModeTMUX {
+		t.Fatalf("status = %#v", status)
+	}
+	if status.State != runtime.SessionLifecycleRunning {
+		t.Fatalf("status.State = %q, want running", status.State)
+	}
+	if status.Tmux == nil || status.Tmux.Name != SessionName() {
+		t.Fatalf("status.Tmux = %#v", status.Tmux)
+	}
+}
+
+func TestMayorStopUsesManagedBinding(t *testing.T) {
+	townRoot := t.TempDir()
+	managed := &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: true}}
+	binding := runtime.SessionBinding{
+		IssueID:          SessionName(),
+		Role:             "mayor",
+		AgentName:        "mayor",
+		Provider:         "copilot-external",
+		SessionName:      SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleRunning,
+		UpdatedAt:        time.Now().UTC(),
+		WorkDir:          filepath.Join(townRoot, "mayor"),
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{townRoot: townRoot, adapter: &fakeRuntimeAdapter{session: managed}}
+
+	if err := m.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if !managed.closed {
+		t.Fatal("managed session was not closed")
+	}
+	got, err := store.Load(context.Background(), binding.IssueID, binding.Role, binding.RigName, binding.AgentName)
+	if err != nil {
+		t.Fatalf("Load() after stop error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("binding still exists after stop: %#v", got)
 	}
 }

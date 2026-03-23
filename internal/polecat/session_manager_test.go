@@ -1,6 +1,7 @@
 package polecat
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,11 +12,79 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
+	runtimepkg "github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+type fakeManagedSession struct {
+	status   runtimepkg.SessionStatus
+	err      error
+	messages []string
+	closed   bool
+}
+
+func (f *fakeManagedSession) ID() string { return f.status.SessionID }
+func (f *fakeManagedSession) Status(context.Context) (runtimepkg.SessionStatus, error) {
+	return f.status, f.err
+}
+func (f *fakeManagedSession) Send(_ context.Context, message string) error {
+	f.messages = append(f.messages, message)
+	return nil
+}
+func (f *fakeManagedSession) Close(context.Context) error {
+	f.closed = true
+	return nil
+}
+
+type fakeSessionAdapter struct {
+	startReq      *runtimepkg.SessionLaunchRequest
+	resumeReq     *runtimepkg.SessionResumeRequest
+	lookupReq     *runtimepkg.SessionLookupRequest
+	resumeSession runtimepkg.ManagedSession
+	err           error
+}
+
+func (f *fakeSessionAdapter) Start(_ context.Context, req runtimepkg.SessionLaunchRequest) (runtimepkg.ManagedSession, error) {
+	f.startReq = &req
+	return f.resumeSession, f.err
+}
+
+func (f *fakeSessionAdapter) Resume(_ context.Context, req runtimepkg.SessionResumeRequest) (runtimepkg.ManagedSession, error) {
+	f.resumeReq = &req
+	return f.resumeSession, f.err
+}
+
+func (f *fakeSessionAdapter) Lookup(_ context.Context, req runtimepkg.SessionLookupRequest) (runtimepkg.ManagedSession, error) {
+	f.lookupReq = &req
+	return f.resumeSession, f.err
+}
+
+type fakeBindingStore struct {
+	binding *runtimepkg.SessionBinding
+	list    []runtimepkg.SessionBinding
+	err     error
+}
+
+func (f *fakeBindingStore) Save(context.Context, runtimepkg.SessionBinding) error { return f.err }
+func (f *fakeBindingStore) Load(context.Context, string, string, string, string) (*runtimepkg.SessionBinding, error) {
+	return f.binding, f.err
+}
+func (f *fakeBindingStore) List(context.Context, string, string) ([]runtimepkg.SessionBinding, error) {
+	return append([]runtimepkg.SessionBinding(nil), f.list...), f.err
+}
+func (f *fakeBindingStore) Delete(context.Context, string, string, string, string) error {
+	return f.err
+}
+
+type fakeShowIssueManager struct {
+	SessionManager
+	result runtimepkg.ToolResult
+	err    error
+}
 
 func setupTestRegistryForSession(t *testing.T) {
 	t.Helper()
@@ -156,6 +225,25 @@ func TestSessionManagerListEmpty(t *testing.T) {
 	}
 }
 
+func TestSessionManagerListIncludesManagedBindings(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "gastown", Path: t.TempDir()}
+	adapter := &fakeSessionAdapter{resumeSession: &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: true}}}
+	binding := runtimepkg.SessionBinding{Role: "polecat", RigName: "gastown", AgentName: "toast", RuntimeSessionID: "runtime-123", SessionName: "gt-toast", Provider: "copilot-external"}
+	store := &fakeBindingStore{binding: &binding, list: []runtimepkg.SessionBinding{binding}}
+	m := &SessionManager{tmux: tmux.NewTmux(), rig: r, bindings: store, adapter: adapter}
+	infos, err := m.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("List() len = %d, want 1", len(infos))
+	}
+	if infos[0].Polecat != "toast" || infos[0].SessionID != "gt-toast" || !infos[0].Running {
+		t.Fatalf("infos = %#v", infos)
+	}
+}
+
 func TestStopNotFound(t *testing.T) {
 	requireTmux(t)
 
@@ -198,6 +286,45 @@ func TestInjectNotFound(t *testing.T) {
 	err := m.Inject("Toast", "hello")
 	if err != ErrSessionNotFound {
 		t.Errorf("Inject = %v, want ErrSessionNotFound", err)
+	}
+}
+
+func TestInjectUsesManagedBindingWhenAvailable(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "gastown", Path: t.TempDir()}
+	managed := &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: true}}
+	adapter := &fakeSessionAdapter{resumeSession: managed}
+	store := &fakeBindingStore{binding: &runtimepkg.SessionBinding{Role: "polecat", RigName: "gastown", AgentName: "Toast", RuntimeSessionID: "runtime-123", SessionName: "gt-toast", Provider: "copilot-external"}}
+	m := &SessionManager{tmux: tmux.NewTmux(), rig: r, bindings: store, adapter: adapter}
+	if err := m.Inject("Toast", "hello"); err != nil {
+		t.Fatalf("Inject() error = %v", err)
+	}
+	if len(managed.messages) != 1 || managed.messages[0] != "hello" {
+		t.Fatalf("messages = %#v", managed.messages)
+	}
+}
+
+func TestCaptureReturnsUnsupportedForManagedNonTmuxSession(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "gastown", Path: t.TempDir()}
+	adapter := &fakeSessionAdapter{resumeSession: &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: true}}}
+	store := &fakeBindingStore{binding: &runtimepkg.SessionBinding{Role: "polecat", RigName: "gastown", AgentName: "Toast", RuntimeSessionID: "runtime-123", SessionName: "gt-toast", Provider: "copilot-external"}}
+	m := &SessionManager{tmux: tmux.NewTmux(), rig: r, bindings: store, adapter: adapter}
+	_, err := m.Capture("Toast", 50)
+	if err != ErrInteractionUnsupported {
+		t.Fatalf("Capture() error = %v, want ErrInteractionUnsupported", err)
+	}
+}
+
+func TestAttachReturnsUnsupportedForManagedNonTmuxSession(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "gastown", Path: t.TempDir()}
+	adapter := &fakeSessionAdapter{resumeSession: &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: true}}}
+	store := &fakeBindingStore{binding: &runtimepkg.SessionBinding{Role: "polecat", RigName: "gastown", AgentName: "Toast", RuntimeSessionID: "runtime-123", SessionName: "gt-toast", Provider: "copilot-external"}}
+	m := &SessionManager{tmux: tmux.NewTmux(), rig: r, bindings: store, adapter: adapter}
+	err := m.Attach("Toast")
+	if err != ErrInteractionUnsupported {
+		t.Fatalf("Attach() error = %v, want ErrInteractionUnsupported", err)
 	}
 }
 
@@ -376,6 +503,115 @@ func TestSessionManager_resolveBeadsDir(t *testing.T) {
 	}
 }
 
+func TestValidateVSDDDispatchAllowsSatisfiedIssue(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	issueID := "slotmachine-910"
+	b := beads.NewIsolated(rigPath)
+	if err := b.Init("testgate"); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	desc := beads.SetVSDDPhaseFields(&beads.Issue{}, &beads.VSDDPhaseFields{Phase: beads.VSDDPhaseImplementation, SpecApproved: true, TestsRed: true})
+	desc = beads.SetVSDDArtifactFields(&beads.Issue{Description: desc}, &beads.VSDDArtifactFields{
+		SpecArtifactID:       "spec-1",
+		SpecReviewArtifactID: "spec-review-1",
+		TestPlanArtifactID:   "test-plan-1",
+		RedTestEvidenceID:    "red-1",
+	})
+	created, err := b.Create(beads.CreateOptions{Title: "Task", Description: desc, Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	issueID = created.ID
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: rigPath}}
+	if err := m.validateVSDDDispatch(issueID, rigPath); err != nil {
+		t.Fatalf("validateVSDDDispatch() error = %v", err)
+	}
+	issue, err := b.Show(issueID)
+	if err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	phase := beads.ParseVSDDPhaseFields(issue)
+	if phase == nil || phase.LastTransition != "dispatch-ready:implementation" {
+		t.Fatalf("phase after dispatch = %#v", phase)
+	}
+}
+
+func TestValidateVSDDDispatchBlocksMissingArtifacts(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	issueID := "slotmachine-911"
+	b := beads.NewIsolated(rigPath)
+	if err := b.Init("testgate"); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	desc := beads.SetVSDDPhaseFields(&beads.Issue{}, &beads.VSDDPhaseFields{Phase: beads.VSDDPhaseImplementation, SpecApproved: true, TestsRed: true})
+	created, err := b.Create(beads.CreateOptions{Title: "Task", Description: desc, Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	issueID = created.ID
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: rigPath}}
+	err = m.validateVSDDDispatch(issueID, rigPath)
+	if err == nil || !strings.Contains(err.Error(), "blocked by vsdd gate") {
+		t.Fatalf("expected gate error, got %v", err)
+	}
+	issue, err := b.Show(issueID)
+	if err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	phase := beads.ParseVSDDPhaseFields(issue)
+	if phase == nil || !strings.Contains(phase.LastRejection, "missing_artifacts:") || phase.LastTransition != "blocked:implementation" {
+		t.Fatalf("phase after rejection = %#v", phase)
+	}
+}
+
+func TestValidateVSDDDispatchBlocksOnReviewGate(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	b := beads.NewIsolated(rigPath)
+	if err := b.Init("testgate"); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	desc := beads.SetVSDDPhaseFields(&beads.Issue{}, &beads.VSDDPhaseFields{
+		Phase:          beads.VSDDPhaseConvergence,
+		SpecApproved:   true,
+		TestsRed:       true,
+		Implementation: true,
+		ReviewApproved: true,
+		ReviewVerdict:  "READY",
+	})
+	desc = beads.SetVSDDArtifactFields(&beads.Issue{Description: desc}, &beads.VSDDArtifactFields{
+		SpecArtifactID:           "spec-1",
+		SpecReviewArtifactID:     "spec-review-1",
+		TestPlanArtifactID:       "test-plan-1",
+		RedTestEvidenceID:        "red-1",
+		ImplementationArtifactID: "impl-1",
+		BuilderEvidenceID:        "builder-1",
+	})
+	created, err := b.Create(beads.CreateOptions{Title: "Task", Description: desc, Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: rigPath}}
+	err = m.validateVSDDDispatch(created.ID, rigPath)
+	if err == nil || !strings.Contains(err.Error(), "missing_artifacts:review_artifact") {
+		t.Fatalf("expected missing review artifact gate error, got %v", err)
+	}
+}
+
 // TestAgentEnvOmitsGTAgent_FallbackRequired verifies that the AgentEnv path
 // used by session_manager.Start does NOT include GT_AGENT when opts.Agent is
 // empty (the default dispatch path). This confirms the session_manager must
@@ -384,7 +620,8 @@ func TestSessionManager_resolveBeadsDir(t *testing.T) {
 //
 // Without the fallback, GT_AGENT is never written to the tmux session table,
 // and the post-startup validation kills the session with:
-//   "GT_AGENT not set in session ... witness patrol will misidentify this polecat"
+//
+//	"GT_AGENT not set in session ... witness patrol will misidentify this polecat"
 //
 // Regression test for the bug introduced in PR #1776 which removed the
 // unconditional runtimeConfig.ResolvedAgent → SetEnvironment("GT_AGENT") logic
@@ -394,23 +631,23 @@ func TestAgentEnvOmitsGTAgent_FallbackRequired(t *testing.T) {
 
 	// Simulate what session_manager.Start calls for each dispatch scenario.
 	cases := []struct {
-		name       string
-		agent      string // opts.Agent value
-		wantGTAgent bool  // whether GT_AGENT should be in AgentEnv output
+		name        string
+		agent       string // opts.Agent value
+		wantGTAgent bool   // whether GT_AGENT should be in AgentEnv output
 	}{
 		{
-			name:       "default dispatch (no --agent flag)",
-			agent:      "",
+			name:        "default dispatch (no --agent flag)",
+			agent:       "",
 			wantGTAgent: false, // fallback needed
 		},
 		{
-			name:       "explicit --agent codex",
-			agent:      "codex",
+			name:        "explicit --agent codex",
+			agent:       "codex",
 			wantGTAgent: true,
 		},
 		{
-			name:       "explicit --agent gemini",
-			agent:      "gemini",
+			name:        "explicit --agent gemini",
+			agent:       "gemini",
 			wantGTAgent: true,
 		},
 	}
@@ -620,5 +857,463 @@ func TestPolecatSlot(t *testing.T) {
 	}
 	if slot := sm.polecatSlot("beta"); slot != 1 {
 		t.Errorf("with hidden dir: polecatSlot(beta) = %d, want 1", slot)
+	}
+}
+
+func TestSessionManagerResumeBoundSessionUsesStoredBinding(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(filepath.Join(rigPath, "polecats", "toast"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(filepath.Join(root, ".runtime"))
+	})
+	r := &rig.Rig{Name: "gastown", Path: rigPath, Polecats: []string{"toast"}}
+	adapter := &fakeSessionAdapter{resumeSession: &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: true}}}
+	store := &fakeBindingStore{binding: &runtimepkg.SessionBinding{
+		IssueID:          "slotmachine-910",
+		Role:             "polecat",
+		RigName:          "gastown",
+		AgentName:        "toast",
+		Provider:         "claude",
+		SessionName:      "gt-toast",
+		RuntimeSessionID: "runtime-123",
+		WorkDir:          filepath.Join(rigPath, "polecats", "toast"),
+	}}
+	m := &SessionManager{tmux: tmux.NewTmux(), rig: r, adapter: adapter, bindings: store}
+
+	err := m.Start("toast", SessionStartOptions{Issue: "slotmachine-910", WorkDir: filepath.Join(rigPath, "polecats", "toast")})
+	if adapter.resumeReq == nil {
+		t.Fatal("expected resume path to be used")
+	}
+	if adapter.resumeReq.SessionID != "runtime-123" {
+		t.Fatalf("resume session id = %q, want runtime-123", adapter.resumeReq.SessionID)
+	}
+	if adapter.resumeReq.IssueID != "slotmachine-910" {
+		t.Fatalf("resume issue id = %q, want slotmachine-910", adapter.resumeReq.IssueID)
+	}
+	if err != nil {
+		t.Fatalf("Start() error = %v, want resume path success", err)
+	}
+}
+
+func TestResumeForIssueRequiresIdentifiers(t *testing.T) {
+	t.Parallel()
+	m := &SessionManager{}
+	if err := m.ResumeForIssue("", "toast", SessionStartOptions{}); err == nil {
+		t.Fatal("ResumeForIssue() error = nil, want missing issue")
+	}
+	if err := m.ResumeForIssue("slotmachine-910", "", SessionStartOptions{}); err == nil {
+		t.Fatal("ResumeForIssue() error = nil, want missing polecat")
+	}
+}
+
+func TestRuntimeStatusForIssueUsesBinding(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "gastown", Path: t.TempDir()}
+	adapter := &fakeSessionAdapter{resumeSession: &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: true}}}
+	m := &SessionManager{
+		tmux:    tmux.NewTmux(),
+		rig:     r,
+		adapter: adapter,
+		bindings: &fakeBindingStore{binding: &runtimepkg.SessionBinding{
+			IssueID:          "slotmachine-910",
+			Role:             "polecat",
+			RigName:          "gastown",
+			AgentName:        "toast",
+			Provider:         "claude",
+			SessionName:      "missing-session",
+			RuntimeSessionID: "runtime-123",
+		}},
+	}
+	status, err := m.RuntimeStatusForIssue("slotmachine-910", "toast")
+	if err != nil {
+		t.Fatalf("RuntimeStatusForIssue() error = %v", err)
+	}
+	if status.SessionID != "runtime-123" {
+		t.Fatalf("SessionID = %q, want runtime-123", status.SessionID)
+	}
+	if !status.Alive {
+		t.Fatal("Alive = false, want adapter-backed alive status")
+	}
+	if adapter.lookupReq == nil || adapter.lookupReq.SessionID != "runtime-123" {
+		t.Fatalf("lookupReq = %#v", adapter.lookupReq)
+	}
+}
+
+func TestBindingForPolecatReturnsBinding(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "gastown", Path: t.TempDir()}
+	store := &fakeBindingStore{binding: &runtimepkg.SessionBinding{Role: "polecat", RigName: "gastown", AgentName: "toast", RuntimeSessionID: "runtime-123"}}
+	m := &SessionManager{tmux: tmux.NewTmux(), rig: r, bindings: store}
+	binding, err := m.BindingForPolecat("toast")
+	if err != nil {
+		t.Fatalf("BindingForPolecat() error = %v", err)
+	}
+	if binding == nil || binding.RuntimeSessionID != "runtime-123" {
+		t.Fatalf("binding = %#v", binding)
+	}
+}
+
+func TestStopUsesManagedBindingWhenAvailable(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "gastown", Path: t.TempDir()}
+	managed := &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: true}}
+	adapter := &fakeSessionAdapter{resumeSession: managed}
+	store := &fakeBindingStore{binding: &runtimepkg.SessionBinding{Role: "polecat", RigName: "gastown", AgentName: "toast", RuntimeSessionID: "runtime-123", SessionName: "gt-toast", Provider: "copilot-external"}}
+	m := &SessionManager{tmux: tmux.NewTmux(), rig: r, bindings: store, adapter: adapter}
+	if err := m.Stop("toast", true); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if !managed.closed {
+		t.Fatal("managed session was not closed")
+	}
+	if adapter.lookupReq == nil || adapter.lookupReq.SessionID != "runtime-123" {
+		t.Fatalf("lookupReq = %#v", adapter.lookupReq)
+	}
+}
+
+func TestIsRunningUsesManagedBindingWhenAvailable(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "gastown", Path: t.TempDir()}
+	adapter := &fakeSessionAdapter{resumeSession: &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: true}}}
+	store := &fakeBindingStore{binding: &runtimepkg.SessionBinding{Role: "polecat", RigName: "gastown", AgentName: "toast", RuntimeSessionID: "runtime-123", SessionName: "gt-toast", Provider: "copilot-external"}}
+	m := &SessionManager{tmux: tmux.NewTmux(), rig: r, bindings: store, adapter: adapter}
+	running, err := m.IsRunning("toast")
+	if err != nil {
+		t.Fatalf("IsRunning() error = %v", err)
+	}
+	if !running {
+		t.Fatal("IsRunning() = false, want true")
+	}
+}
+
+func TestShowIssueForRuntimeRequiresIssueID(t *testing.T) {
+	t.Parallel()
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: t.TempDir()}}
+	_, err := m.ShowIssueForRuntime("", "")
+	if err == nil {
+		t.Fatal("ShowIssueForRuntime() error = nil, want missing issue")
+	}
+}
+
+func TestInspectWorkflowStateRequiresIssueID(t *testing.T) {
+	t.Parallel()
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: t.TempDir()}}
+	_, err := m.InspectWorkflowState("", "")
+	if err == nil {
+		t.Fatal("InspectWorkflowState() error = nil, want missing issue")
+	}
+}
+
+func TestInspectWorkflowStateReturnsInspection(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	b := beads.NewIsolated(rigPath)
+	if err := b.Init("inspect"); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	desc := beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{
+		Phase:          beads.VSDDPhaseImplementation,
+		SpecApproved:   true,
+		TestsRed:       true,
+		LastTransition: "dispatch-ready:implementation",
+	}, &beads.VSDDArtifactFields{
+		SpecArtifactID:       "spec-1",
+		SpecReviewArtifactID: "spec-review-1",
+		TestPlanArtifactID:   "test-plan-1",
+		RedTestEvidenceID:    "red-1",
+	})
+	created, err := b.Create(beads.CreateOptions{Title: "Task", Description: desc, Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: rigPath}}
+	inspection, err := m.InspectWorkflowState(created.ID, rigPath)
+	if err != nil {
+		t.Fatalf("InspectWorkflowState() error = %v", err)
+	}
+	if inspection.Phase != beads.VSDDPhaseImplementation || !inspection.DispatchReady {
+		t.Fatalf("inspection = %#v", inspection)
+	}
+}
+
+func TestReadyIssuesForRuntimeReturnsReadyList(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	b := beads.NewIsolated(rigPath)
+	if err := b.Init("ready-runtime"); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	created, err := b.Create(beads.CreateOptions{Title: "Ready Task", Description: "runtime ready", Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: rigPath}}
+	result, err := m.ReadyIssuesForRuntime(rigPath)
+	if err != nil {
+		t.Fatalf("ReadyIssuesForRuntime() error = %v", err)
+	}
+	if result.Data["count"] == "0" || !strings.Contains(result.Data["ids"], created.ID) {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestLoadReviewForRuntimeRequiresIssueID(t *testing.T) {
+	t.Parallel()
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: t.TempDir()}}
+	_, err := m.LoadReviewForRuntime("", "")
+	if err == nil {
+		t.Fatal("LoadReviewForRuntime() error = nil, want missing issue")
+	}
+}
+
+func TestLoadReviewForRuntimeReturnsWorkflowDetails(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	b := beads.NewIsolated(rigPath)
+	if err := b.Init("review-runtime"); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	desc := beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{
+		Phase:          beads.VSDDPhaseReview,
+		SpecApproved:   true,
+		TestsRed:       true,
+		Implementation: true,
+		ReviewVerdict:  "READY",
+		ReviewApproved: true,
+		LastTransition: "entered:review",
+	}, &beads.VSDDArtifactFields{
+		SpecArtifactID:           "spec-1",
+		SpecReviewArtifactID:     "spec-review-1",
+		TestPlanArtifactID:       "test-plan-1",
+		RedTestEvidenceID:        "red-1",
+		ImplementationArtifactID: "impl-1",
+		BuilderEvidenceID:        "builder-1",
+		ReviewArtifactID:         "review-1",
+	})
+	created, err := b.Create(beads.CreateOptions{Title: "Review Task", Description: desc, Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: rigPath}}
+	result, err := m.LoadReviewForRuntime(created.ID, rigPath)
+	if err != nil {
+		t.Fatalf("LoadReviewForRuntime() error = %v", err)
+	}
+	if result.Data["review_verdict"] != "READY" || result.Data["review_artifact"] != "review-1" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestVerifyIssueForRuntimeReturnsVerificationStatus(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	b := beads.NewIsolated(rigPath)
+	if err := b.Init("verify-runtime"); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	desc := beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{
+		Phase:          beads.VSDDPhaseConvergence,
+		SpecApproved:   true,
+		TestsRed:       true,
+		Implementation: true,
+		ReviewVerdict:  "NOT_READY",
+		ReviewApproved: false,
+		LastTransition: "blocked:convergence",
+		LastRejection:  "review_rejected",
+	}, &beads.VSDDArtifactFields{
+		SpecArtifactID:           "spec-1",
+		SpecReviewArtifactID:     "spec-review-1",
+		TestPlanArtifactID:       "test-plan-1",
+		RedTestEvidenceID:        "red-1",
+		ImplementationArtifactID: "impl-1",
+		BuilderEvidenceID:        "builder-1",
+		ReviewArtifactID:         "review-1",
+	})
+	created, err := b.Create(beads.CreateOptions{Title: "Verify Task", Description: desc, Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: rigPath}}
+	result, err := m.VerifyIssueForRuntime(created.ID, rigPath)
+	if err != nil {
+		t.Fatalf("VerifyIssueForRuntime() error = %v", err)
+	}
+	if result.Data["verification_status"] != "blocked" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestRecordReviewVerdictPersistsStructuredReview(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	b := beads.NewIsolated(rigPath)
+	if err := b.Init("record-review"); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	desc := beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{
+		Phase:          beads.VSDDPhaseReview,
+		SpecApproved:   true,
+		TestsRed:       true,
+		Implementation: true,
+	}, &beads.VSDDArtifactFields{
+		SpecArtifactID:           "spec-1",
+		SpecReviewArtifactID:     "spec-review-1",
+		TestPlanArtifactID:       "tests-1",
+		RedTestEvidenceID:        "red-1",
+		ImplementationArtifactID: "impl-1",
+		BuilderEvidenceID:        "builder-1",
+	})
+	created, err := b.Create(beads.CreateOptions{Title: "Review Verdict Task", Description: desc, Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: rigPath}}
+	inspection, err := m.RecordReviewVerdict(created.ID, rigPath, beads.VSDDReviewVerdictInput{
+		Verdict:          "READY",
+		Summary:          "Reviewed approved evidence and found no blockers.",
+		EvidenceRefs:     []string{"spec-1", "impl-1", "builder-1"},
+		FreshContext:     true,
+		ReviewArtifactID: "review-1",
+	})
+	if err != nil {
+		t.Fatalf("RecordReviewVerdict() error = %v", err)
+	}
+	if inspection.ReviewVerdict != "READY" || !inspection.ReviewApproved || !inspection.ReviewContractOK {
+		t.Fatalf("inspection = %#v", inspection)
+	}
+	issue, err := b.Show(created.ID)
+	if err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	if !strings.Contains(issue.Description, "vsdd_review_artifact: review-1") || !strings.Contains(issue.Description, "vsdd_review_summary: Reviewed approved evidence and found no blockers.") {
+		t.Fatalf("description = %q", issue.Description)
+	}
+}
+
+func TestRecordReviewVerdictRejectsMalformedReview(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	b := beads.NewIsolated(rigPath)
+	if err := b.Init("record-review-malformed"); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	desc := beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{Phase: beads.VSDDPhaseReview, SpecApproved: true, TestsRed: true, Implementation: true}, &beads.VSDDArtifactFields{SpecArtifactID: "spec-1", SpecReviewArtifactID: "spec-review-1", TestPlanArtifactID: "tests-1", RedTestEvidenceID: "red-1", ImplementationArtifactID: "impl-1", BuilderEvidenceID: "builder-1"})
+	created, err := b.Create(beads.CreateOptions{Title: "Malformed Review Task", Description: desc, Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: rigPath}}
+	inspection, err := m.RecordReviewVerdict(created.ID, rigPath, beads.VSDDReviewVerdictInput{Verdict: "NOT READY", Summary: "Missing findings but no list.", EvidenceRefs: []string{"spec-1"}, FreshContext: true})
+	if err == nil {
+		t.Fatal("RecordReviewVerdict() error = nil, want malformed review error")
+	}
+	if inspection == nil || !strings.Contains(inspection.LastRejection, string(beads.VSDDRejectReviewMalformed)) {
+		t.Fatalf("inspection = %#v err = %v", inspection, err)
+	}
+}
+
+func TestValidateVSDDDispatchBlocksMalformedReviewForConvergence(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	b := beads.NewIsolated(rigPath)
+	if err := b.Init("dispatch-review-block"); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	desc := beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{
+		Phase:          beads.VSDDPhaseConvergence,
+		SpecApproved:   true,
+		TestsRed:       true,
+		Implementation: true,
+		ReviewVerdict:  "READY",
+		ReviewApproved: true,
+		ReviewFresh:    false,
+	}, &beads.VSDDArtifactFields{
+		SpecArtifactID:           "spec-1",
+		SpecReviewArtifactID:     "spec-review-1",
+		TestPlanArtifactID:       "tests-1",
+		RedTestEvidenceID:        "red-1",
+		ImplementationArtifactID: "impl-1",
+		BuilderEvidenceID:        "builder-1",
+		ReviewArtifactID:         "review-1",
+	})
+	created, err := b.Create(beads.CreateOptions{Title: "Dispatch Review Block Task", Description: desc, Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: rigPath}}
+	err = m.validateVSDDDispatch(created.ID, rigPath)
+	if err == nil || !strings.Contains(err.Error(), "review contract") {
+		t.Fatalf("expected review contract error, got %v", err)
+	}
+	issue, err := b.Show(created.ID)
+	if err != nil {
+		t.Fatalf("Show() error = %v", err)
+	}
+	phase := beads.ParseVSDDPhaseFields(issue)
+	if phase == nil || !strings.Contains(phase.LastRejection, string(beads.VSDDRejectReviewMalformed)) || phase.LastTransition != "blocked:convergence" {
+		t.Fatalf("phase = %#v", phase)
+	}
+}
+
+func TestExplainWorkflowStateIncludesReviewIntegrityDetails(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	b := beads.NewIsolated(rigPath)
+	if err := b.Init("explain-review"); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	desc, err := beads.PersistReviewVerdict(&beads.Issue{Description: beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{Phase: beads.VSDDPhaseReview, SpecApproved: true, TestsRed: true, Implementation: true}, &beads.VSDDArtifactFields{SpecArtifactID: "spec-1", SpecReviewArtifactID: "spec-review-1", TestPlanArtifactID: "tests-1", RedTestEvidenceID: "red-1", ImplementationArtifactID: "impl-1", BuilderEvidenceID: "builder-1"})}, beads.VSDDReviewVerdictInput{Verdict: "NOT READY", Summary: "Regression evidence is incomplete.", EvidenceRefs: []string{"spec-1", "builder-1"}, Findings: []string{"missing regression test"}, FreshContext: true, ReviewArtifactID: "review-1"})
+	if err != nil {
+		t.Fatalf("PersistReviewVerdict() error = %v", err)
+	}
+	created, err := b.Create(beads.CreateOptions{Title: "Explain Workflow Task", Description: desc, Labels: []string{"gt:task"}})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	m := &SessionManager{rig: &rig.Rig{Name: "gastown", Path: rigPath}}
+	explanation, err := m.ExplainWorkflowState(created.ID, rigPath)
+	if err != nil {
+		t.Fatalf("ExplainWorkflowState() error = %v", err)
+	}
+	for _, want := range []string{"review_contract_ok=true", "review_verdict=NOT READY", "review_summary=Regression evidence is incomplete.", "review_findings=missing regression test", "review_evidence=builder-1,spec-1"} {
+		if !strings.Contains(explanation, want) {
+			t.Fatalf("explanation = %q, want %q", explanation, want)
+		}
 	}
 }

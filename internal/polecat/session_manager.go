@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,12 +17,14 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/toolcallbacks"
 )
 
 // debugSession logs non-fatal errors during session startup when GT_DEBUG_SESSION=1.
@@ -33,22 +36,38 @@ func debugSession(context string, err error) {
 
 // Session errors
 var (
-	ErrSessionRunning  = errors.New("session already running")
-	ErrSessionNotFound = errors.New("session not found")
-	ErrIssueInvalid    = errors.New("issue not found or tombstoned")
+	ErrSessionRunning         = errors.New("session already running")
+	ErrSessionNotFound        = errors.New("session not found")
+	ErrIssueInvalid           = errors.New("issue not found or tombstoned")
+	ErrInteractionUnsupported = errors.New("session interaction unsupported for this runtime")
 )
 
 // SessionManager handles polecat session lifecycle.
 type SessionManager struct {
-	tmux *tmux.Tmux
-	rig  *rig.Rig
+	tmux     *tmux.Tmux
+	rig      *rig.Rig
+	adapter  runtime.SessionAdapter
+	bindings runtime.SessionBindingStore
 }
 
 // NewSessionManager creates a new polecat session manager for a rig.
 func NewSessionManager(t *tmux.Tmux, r *rig.Rig) *SessionManager {
+	if t == nil {
+		t = tmux.NewTmux()
+	}
+	townRoot := ""
+	if r != nil {
+		townRoot = filepath.Dir(r.Path)
+	}
+	adapter := runtime.NewTmuxSessionAdapter(t)
+	if townRoot != "" {
+		adapter = adapter.WithBindingStore(runtime.NewFileSessionBindingStore(townRoot))
+	}
 	return &SessionManager{
-		tmux: t,
-		rig:  r,
+		tmux:     t,
+		rig:      r,
+		adapter:  adapter,
+		bindings: adapter.BindingStore(),
 	}
 }
 
@@ -117,6 +136,304 @@ func (m *SessionManager) SessionName(polecat string) string {
 	}
 
 	return sessionName
+}
+
+func (m *SessionManager) bindingStore() runtime.SessionBindingStore {
+	if m.bindings != nil {
+		return m.bindings
+	}
+	if m.rig == nil || m.rig.Path == "" {
+		return nil
+	}
+	return runtime.NewFileSessionBindingStore(filepath.Dir(m.rig.Path))
+}
+
+func (m *SessionManager) sessionAdapter() runtime.SessionAdapter {
+	if m.adapter != nil {
+		return m.adapter
+	}
+	adapter := runtime.NewTmuxSessionAdapter(m.tmux)
+	if store := m.bindingStore(); store != nil {
+		adapter = adapter.WithBindingStore(store)
+	}
+	return adapter
+}
+
+func (m *SessionManager) ResumeForIssue(issueID, polecat string, opts SessionStartOptions) error {
+	if issueID == "" {
+		return fmt.Errorf("issue id is required")
+	}
+	if opts.Issue == "" {
+		opts.Issue = issueID
+	}
+	if polecat == "" {
+		return fmt.Errorf("polecat name is required")
+	}
+	return m.Start(polecat, opts)
+}
+
+func (m *SessionManager) RuntimeStatusForIssue(issueID, polecat string) (*runtime.SessionStatus, error) {
+	if issueID == "" {
+		return nil, fmt.Errorf("issue id is required")
+	}
+	bindingStore := m.bindingStore()
+	if bindingStore == nil {
+		return nil, fmt.Errorf("session binding store unavailable")
+	}
+	binding, err := bindingStore.Load(context.Background(), issueID, "polecat", m.rig.Name, polecat)
+	if err != nil {
+		return nil, fmt.Errorf("loading binding: %w", err)
+	}
+	if binding == nil {
+		return nil, ErrSessionNotFound
+	}
+	managed, _, err := m.lookupManagedPolecatSession(polecat)
+	if err != nil {
+		return nil, fmt.Errorf("looking up managed session: %w", err)
+	}
+	if managed == nil {
+		return nil, ErrSessionNotFound
+	}
+	status, err := managed.Status(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("checking managed session status: %w", err)
+	}
+	_ = events.LogFeed(runtime.TypeRuntimeSessionStatus, fmt.Sprintf("%s/polecats/%s", m.rig.Name, polecat), runtime.RuntimeSessionPayload(binding.SessionName, status.SessionID, "polecat", issueID, binding.Provider, map[string]interface{}{"alive": status.Alive, "ready": status.Ready, "busy": status.Busy}))
+	return &status, nil
+}
+
+func (m *SessionManager) BindingForPolecat(polecat string) (*runtime.SessionBinding, error) {
+	if polecat == "" {
+		return nil, fmt.Errorf("polecat is required")
+	}
+	if m.rig == nil {
+		return nil, fmt.Errorf("rig is required")
+	}
+	return m.bindingStore().Load(context.Background(), "", "polecat", m.rig.Name, polecat)
+}
+
+func (m *SessionManager) lookupManagedPolecatSession(polecat string) (runtime.ManagedSession, *runtime.SessionBinding, error) {
+	binding, err := m.BindingForPolecat(polecat)
+	if err != nil {
+		return nil, nil, err
+	}
+	if binding == nil || binding.RuntimeSessionID == "" {
+		return nil, binding, nil
+	}
+	managed, err := m.sessionAdapter().Lookup(context.Background(), runtime.SessionLookupRequest{
+		SessionID:   binding.RuntimeSessionID,
+		Provider:    binding.Provider,
+		IssueID:     binding.IssueID,
+		SessionName: binding.SessionName,
+		Role:        binding.Role,
+		TownRoot:    filepath.Dir(m.rig.Path),
+		RigName:     m.rig.Name,
+		RigPath:     m.rig.Path,
+		AgentName:   polecat,
+		WorkDir:     binding.WorkDir,
+		Metadata:    binding.Metadata,
+	})
+	if err != nil {
+		return nil, binding, err
+	}
+	return managed, binding, nil
+}
+
+func (m *SessionManager) ShowIssueForRuntime(issueID string, workDir string) (runtime.ToolResult, error) {
+	if issueID == "" {
+		return runtime.ToolResult{}, fmt.Errorf("issue id is required")
+	}
+	if workDir == "" {
+		workDir = m.rig.Path
+	}
+	reader := runtimeIssueReader{beads: beads.New(m.resolveBeadsDir(issueID, workDir))}
+	toolExec := runtime.NewBeadsToolExecutor(reader)
+	return toolExec.Execute(context.Background(), "polecat", runtime.ToolCall{Name: runtime.ToolBDShow, Arguments: map[string]string{"id": issueID}})
+}
+
+func (m *SessionManager) ReadyIssuesForRuntime(workDir string) (runtime.ToolResult, error) {
+	if workDir == "" {
+		workDir = m.rig.Path
+	}
+	reader := runtimeIssueReader{beads: beads.New(m.resolveBeadsDir("", workDir))}
+	toolExec := runtime.NewToolExecutor(runtime.ToolSupport{Ready: reader})
+	return toolExec.Execute(context.Background(), "mayor", runtime.ToolCall{Name: runtime.ToolBDReady})
+}
+
+func (m *SessionManager) LoadReviewForRuntime(issueID, workDir string) (runtime.ToolResult, error) {
+	if issueID == "" {
+		return runtime.ToolResult{}, fmt.Errorf("issue id is required")
+	}
+	if workDir == "" {
+		workDir = m.rig.Path
+	}
+	reader := runtimeIssueReader{beads: beads.New(m.resolveBeadsDir(issueID, workDir))}
+	toolExec := runtime.NewToolExecutor(runtime.ToolSupport{Workflow: reader})
+	return toolExec.Execute(context.Background(), "witness", runtime.ToolCall{Name: runtime.ToolLoadReview, Arguments: map[string]string{"id": issueID}})
+}
+
+func (m *SessionManager) VerifyIssueForRuntime(issueID, workDir string) (runtime.ToolResult, error) {
+	if issueID == "" {
+		return runtime.ToolResult{}, fmt.Errorf("issue id is required")
+	}
+	if workDir == "" {
+		workDir = m.rig.Path
+	}
+	reader := runtimeIssueReader{beads: beads.New(m.resolveBeadsDir(issueID, workDir))}
+	toolExec := runtime.NewToolExecutor(runtime.ToolSupport{Workflow: reader})
+	return toolExec.Execute(context.Background(), "witness", runtime.ToolCall{Name: runtime.ToolRunVerification, Arguments: map[string]string{"id": issueID}})
+}
+
+func (m *SessionManager) InspectWorkflowState(issueID, workDir string) (*beads.VSDDWorkflowInspection, error) {
+	if issueID == "" {
+		return nil, fmt.Errorf("issue id is required")
+	}
+	if workDir == "" {
+		workDir = m.rig.Path
+	}
+	issue, err := beads.New(m.resolveBeadsDir(issueID, workDir)).Show(issueID)
+	if err != nil {
+		return nil, err
+	}
+	inspection := beads.InspectVSDDWorkflow(issue)
+	if inspection == nil {
+		return nil, fmt.Errorf("issue %s has no vsdd workflow state", issueID)
+	}
+	return inspection, nil
+}
+
+func (m *SessionManager) ExplainWorkflowState(issueID, workDir string) (string, error) {
+	inspection, err := m.InspectWorkflowState(issueID, workDir)
+	if err != nil {
+		return "", err
+	}
+	parts := []string{
+		fmt.Sprintf("phase=%s", inspection.Phase),
+		fmt.Sprintf("dispatch_ready=%t", inspection.DispatchReady),
+		fmt.Sprintf("review_contract_ok=%t", inspection.ReviewContractOK),
+	}
+	if inspection.LastTransition != "" {
+		parts = append(parts, fmt.Sprintf("last_transition=%s", inspection.LastTransition))
+	}
+	if inspection.LastRejection != "" {
+		parts = append(parts, fmt.Sprintf("blocked_by=%s", inspection.LastRejection))
+	}
+	if inspection.ReviewVerdict != "" {
+		parts = append(parts, fmt.Sprintf("review_verdict=%s", inspection.ReviewVerdict))
+	}
+	if inspection.ReviewSummary != "" {
+		parts = append(parts, fmt.Sprintf("review_summary=%s", inspection.ReviewSummary))
+	}
+	if len(inspection.ReviewEvidence) > 0 {
+		parts = append(parts, fmt.Sprintf("review_evidence=%s", strings.Join(inspection.ReviewEvidence, ",")))
+	}
+	if len(inspection.ReviewFindings) > 0 {
+		parts = append(parts, fmt.Sprintf("review_findings=%s", strings.Join(inspection.ReviewFindings, ",")))
+	}
+	if len(inspection.MissingArtifacts) > 0 {
+		parts = append(parts, fmt.Sprintf("missing_artifacts=%s", strings.Join(inspection.MissingArtifacts, ",")))
+	}
+	return strings.Join(parts, "\n"), nil
+}
+
+func (m *SessionManager) RecordReviewVerdict(issueID, workDir string, input beads.VSDDReviewVerdictInput) (*beads.VSDDWorkflowInspection, error) {
+	if issueID == "" {
+		return nil, fmt.Errorf("issue id is required")
+	}
+	if workDir == "" {
+		workDir = m.rig.Path
+	}
+	bd := beads.New(m.resolveBeadsDir(issueID, workDir))
+	issue, err := bd.Show(issueID)
+	if err != nil {
+		return nil, err
+	}
+	description, persistErr := beads.PersistReviewVerdict(issue, input)
+	if updateErr := bd.Update(issueID, beads.UpdateOptions{Description: &description}); updateErr != nil {
+		return nil, updateErr
+	}
+	updatedIssue, err := bd.Show(issueID)
+	if err != nil {
+		return nil, err
+	}
+	inspection := beads.InspectVSDDWorkflow(updatedIssue)
+	if inspection == nil {
+		return nil, fmt.Errorf("issue %s has no vsdd workflow state", issueID)
+	}
+	if persistErr != nil {
+		return inspection, persistErr
+	}
+	return inspection, nil
+}
+
+type runtimeIssueReader struct {
+	beads *beads.Beads
+}
+
+func (r runtimeIssueReader) Show(id string) (*runtime.BeadView, error) {
+	issue, err := r.beads.Show(id)
+	if err != nil {
+		return nil, err
+	}
+	return &runtime.BeadView{
+		ID:          issue.ID,
+		Title:       issue.Title,
+		Status:      issue.Status,
+		IssueType:   issue.Type,
+		Assignee:    issue.Assignee,
+		Description: issue.Description,
+	}, nil
+}
+
+func (r runtimeIssueReader) Ready() ([]*runtime.BeadView, error) {
+	issues, err := r.beads.Ready()
+	if err != nil {
+		return nil, err
+	}
+	views := make([]*runtime.BeadView, 0, len(issues))
+	for _, issue := range issues {
+		views = append(views, &runtime.BeadView{
+			ID:        issue.ID,
+			Title:     issue.Title,
+			Status:    issue.Status,
+			IssueType: issue.Type,
+			Assignee:  issue.Assignee,
+		})
+	}
+	return views, nil
+}
+
+func (r runtimeIssueReader) InspectWorkflow(id string) (*runtime.WorkflowInspection, error) {
+	issue, err := r.beads.Show(id)
+	if err != nil {
+		return nil, err
+	}
+	inspection := beads.InspectVSDDWorkflow(issue)
+	if inspection == nil {
+		return nil, fmt.Errorf("issue %s has no vsdd workflow state", id)
+	}
+	artifacts := beads.ParseVSDDArtifactFields(issue)
+	reviewArtifactID := ""
+	if artifacts != nil {
+		reviewArtifactID = artifacts.ReviewArtifactID
+	}
+	return &runtime.WorkflowInspection{
+		IssueID:            id,
+		Phase:              string(inspection.Phase),
+		LastTransition:     inspection.LastTransition,
+		LastRejection:      inspection.LastRejection,
+		ReviewVerdict:      inspection.ReviewVerdict,
+		ReviewApproved:     inspection.ReviewApproved,
+		ReviewArtifactID:   reviewArtifactID,
+		ReviewSummary:      inspection.ReviewSummary,
+		ReviewEvidence:     append([]string(nil), inspection.ReviewEvidence...),
+		ReviewFindings:     append([]string(nil), inspection.ReviewFindings...),
+		ReviewContractOK:   inspection.ReviewContractOK,
+		MissingArtifacts:   append([]string(nil), inspection.MissingArtifacts...),
+		RequiredArtifacts:  append([]string(nil), inspection.RequiredArtifacts...),
+		SatisfiedArtifacts: append([]string(nil), inspection.SatisfiedArtifacts...),
+		DispatchReady:      inspection.DispatchReady,
+	}, nil
 }
 
 // validateSessionName checks for double-prefix session names.
@@ -234,10 +551,19 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	if workDir == "" {
 		workDir = m.clonePath(polecat)
 	}
+	bindingStore := m.bindingStore()
+	var existingBinding *runtime.SessionBinding
+	if bindingStore != nil && opts.Issue != "" {
+		binding, err := bindingStore.Load(context.Background(), opts.Issue, "polecat", m.rig.Name, polecat)
+		if err != nil {
+			return fmt.Errorf("loading session binding: %w", err)
+		}
+		existingBinding = binding
+	}
 
 	// Validate issue exists and isn't tombstoned BEFORE creating session.
 	// This prevents CPU spin loops from agents retrying work on invalid issues.
-	if opts.Issue != "" {
+	if opts.Issue != "" && existingBinding == nil {
 		if err := m.validateIssue(opts.Issue, workDir); err != nil {
 			return err
 		}
@@ -286,6 +612,9 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 		ExcludeWorkInstructions: fallbackInfo.SendStartupNudge,
 	}
 	beacon := session.FormatStartupBeacon(beaconConfig)
+	if existingBinding != nil && existingBinding.RuntimeSessionID != "" {
+		return m.resumeBoundSession(existingBinding, polecat, opts, beacon, runtimeConfig, fallbackInfo, townRoot, workDir)
+	}
 
 	command := opts.Command
 	if command == "" {
@@ -509,6 +838,76 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	return nil
 }
 
+func (m *SessionManager) resumeBoundSession(binding *runtime.SessionBinding, polecat string, opts SessionStartOptions, beacon string, runtimeConfig *config.RuntimeConfig, fallbackInfo *runtime.StartupFallbackInfo, townRoot, workDir string) error {
+	sessionID := binding.SessionName
+	if sessionID == "" {
+		sessionID = m.SessionName(polecat)
+	}
+	managedSession, err := m.sessionAdapter().Resume(context.Background(), runtime.SessionResumeRequest{
+		SessionID:            binding.RuntimeSessionID,
+		Provider:             firstNonEmpty(opts.Agent, binding.Provider),
+		IssueID:              opts.Issue,
+		SessionName:          sessionID,
+		Role:                 "polecat",
+		SessionKind:          config.ToolSessionKindPatrol,
+		TownRoot:             townRoot,
+		RigName:              m.rig.Name,
+		RigPath:              m.rig.Path,
+		AgentName:            polecat,
+		WorkDir:              workDir,
+		RuntimeConfigDir:     opts.RuntimeConfigDir,
+		AcceptStartupDialogs: true,
+		Env: map[string]string{
+			"BD_DOLT_AUTO_COMMIT": "off",
+		},
+		ToolPolicy:    polecatToolPolicyPtr(config.ResolveToolPolicyForSession(townRoot, m.rig.Path, "polecat", config.ToolSessionKindPatrol, workDir)),
+		ToolCallbacks: toolcallbacks.ForTown(townRoot, workDir),
+	})
+	if err != nil {
+		return fmt.Errorf("resuming bound session: %w", err)
+	}
+	status, err := managedSession.Status(context.Background())
+	if err != nil {
+		return fmt.Errorf("checking resumed session status: %w", err)
+	}
+	if !status.Alive {
+		return fmt.Errorf("resumed session %s is not alive", sessionID)
+	}
+	if opts.Issue != "" {
+		agentID := fmt.Sprintf("%s/polecats/%s", m.rig.Name, polecat)
+		if err := m.hookIssue(opts.Issue, agentID, workDir); err != nil {
+			style.PrintWarning("could not re-hook issue %s: %v", opts.Issue, err)
+		}
+	}
+	if fallbackInfo != nil && fallbackInfo.SendBeaconNudge {
+		message := beacon
+		if fallbackInfo.SendStartupNudge && fallbackInfo.StartupNudgeDelayMs == 0 {
+			message = beacon + "\n\n" + runtime.StartupNudgeContent()
+		}
+		debugSession("ResumeSendBeacon", managedSession.Send(context.Background(), message))
+	}
+	if fallbackInfo != nil && fallbackInfo.SendStartupNudge && fallbackInfo.StartupNudgeDelayMs > 0 {
+		primeWaitRC := runtime.RuntimeConfigWithMinDelay(runtimeConfig, fallbackInfo.StartupNudgeDelayMs)
+		debugSession("ResumeWaitForPrimeReady", m.tmux.WaitForRuntimeReady(sessionID, primeWaitRC, constants.ClaudeStartTimeout))
+		debugSession("ResumeStartupNudge", managedSession.Send(context.Background(), runtime.StartupNudgeContent()))
+	}
+	debugSession("ResumeTrackSessionPID", session.TrackSessionPID(townRoot, sessionID, m.tmux))
+	return nil
+}
+
+func polecatToolPolicyPtr(policy config.ToolPolicy) *config.ToolPolicy {
+	return &policy
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 // isSessionStale checks if a tmux session's pane process has died.
 // A stale session exists in tmux but its main process (the agent) is no longer running.
 // This happens when the agent crashes during startup but tmux keeps the dead pane.
@@ -520,6 +919,12 @@ func (m *SessionManager) isSessionStale(sessionID string) bool {
 // Stop terminates a polecat session.
 func (m *SessionManager) Stop(polecat string, force bool) error {
 	sessionID := m.SessionName(polecat)
+	if managed, _, err := m.lookupManagedPolecatSession(polecat); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil && status.Alive {
+			return managed.Close(context.Background())
+		}
+	}
 
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
@@ -548,6 +953,12 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 // Checks both tmux session existence AND agent process liveness to avoid
 // reporting zombie sessions (tmux alive but Claude dead) as "running".
 func (m *SessionManager) IsRunning(polecat string) (bool, error) {
+	if managed, _, err := m.lookupManagedPolecatSession(polecat); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil {
+			return status.Alive, nil
+		}
+	}
 	sessionID := m.SessionName(polecat)
 	status := m.tmux.CheckSessionHealth(sessionID, 0)
 	return status == tmux.SessionHealthy, nil
@@ -556,6 +967,23 @@ func (m *SessionManager) IsRunning(polecat string) (bool, error) {
 // Status returns detailed status for a polecat session.
 func (m *SessionManager) Status(polecat string) (*SessionInfo, error) {
 	sessionID := m.SessionName(polecat)
+	binding, err := m.BindingForPolecat(polecat)
+	if err != nil {
+		return nil, fmt.Errorf("loading binding: %w", err)
+	}
+	if binding != nil && binding.RuntimeSessionID != "" {
+		if managed, _, lookupErr := m.lookupManagedPolecatSession(polecat); lookupErr == nil && managed != nil {
+			status, statusErr := managed.Status(context.Background())
+			if statusErr == nil {
+				return &SessionInfo{
+					Polecat:   polecat,
+					SessionID: sessionID,
+					Running:   status.Alive,
+					RigName:   m.rig.Name,
+				}, nil
+			}
+		}
+	}
 
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
@@ -617,7 +1045,7 @@ func (m *SessionManager) List() ([]SessionInfo, error) {
 	}
 
 	prefix := session.PrefixFor(m.rig.Name) + "-"
-	var infos []SessionInfo
+	infosByPolecat := make(map[string]SessionInfo)
 
 	for _, sessionID := range sessions {
 		if !strings.HasPrefix(sessionID, prefix) {
@@ -625,14 +1053,47 @@ func (m *SessionManager) List() ([]SessionInfo, error) {
 		}
 
 		polecat := strings.TrimPrefix(sessionID, prefix)
-		infos = append(infos, SessionInfo{
+		infosByPolecat[polecat] = SessionInfo{
 			Polecat:   polecat,
 			SessionID: sessionID,
 			Running:   true,
 			RigName:   m.rig.Name,
-		})
+		}
 	}
 
+	bindings, err := m.bindingStore().List(context.Background(), "polecat", m.rig.Name)
+	if err == nil {
+		for _, binding := range bindings {
+			if binding.AgentName == "" {
+				continue
+			}
+			if _, exists := infosByPolecat[binding.AgentName]; exists {
+				continue
+			}
+			managed, _, lookupErr := m.lookupManagedPolecatSession(binding.AgentName)
+			if lookupErr != nil || managed == nil {
+				continue
+			}
+			status, statusErr := managed.Status(context.Background())
+			if statusErr != nil || !status.Alive {
+				continue
+			}
+			infosByPolecat[binding.AgentName] = SessionInfo{
+				Polecat:   binding.AgentName,
+				SessionID: binding.SessionName,
+				Running:   true,
+				RigName:   m.rig.Name,
+			}
+		}
+	}
+
+	infos := make([]SessionInfo, 0, len(infosByPolecat))
+	for _, info := range infosByPolecat {
+		infos = append(infos, info)
+	}
+	sort.Slice(infos, func(i, j int) bool {
+		return strings.ToLower(infos[i].Polecat) < strings.ToLower(infos[j].Polecat)
+	})
 	return infos, nil
 }
 
@@ -659,6 +1120,18 @@ func (m *SessionManager) ListPolecats() ([]SessionInfo, error) {
 // Attach attaches to a polecat session.
 func (m *SessionManager) Attach(polecat string) error {
 	sessionID := m.SessionName(polecat)
+	if managed, _, err := m.lookupManagedPolecatSession(polecat); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil && status.Alive {
+			running, tmuxErr := m.tmux.HasSession(sessionID)
+			if tmuxErr != nil {
+				return fmt.Errorf("checking session: %w", tmuxErr)
+			}
+			if !running {
+				return ErrInteractionUnsupported
+			}
+		}
+	}
 
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
@@ -674,6 +1147,18 @@ func (m *SessionManager) Attach(polecat string) error {
 // Capture returns the recent output from a polecat session.
 func (m *SessionManager) Capture(polecat string, lines int) (string, error) {
 	sessionID := m.SessionName(polecat)
+	if managed, _, err := m.lookupManagedPolecatSession(polecat); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil && status.Alive {
+			running, tmuxErr := m.tmux.HasSession(sessionID)
+			if tmuxErr != nil {
+				return "", fmt.Errorf("checking session: %w", tmuxErr)
+			}
+			if !running {
+				return "", ErrInteractionUnsupported
+			}
+		}
+	}
 
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
@@ -702,6 +1187,12 @@ func (m *SessionManager) CaptureSession(sessionID string, lines int) (string, er
 // Inject sends a message to a polecat session.
 func (m *SessionManager) Inject(polecat, message string) error {
 	sessionID := m.SessionName(polecat)
+	if managed, _, err := m.lookupManagedPolecatSession(polecat); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil && status.Alive {
+			return managed.Send(context.Background(), message)
+		}
+	}
 
 	running, err := m.tmux.HasSession(sessionID)
 	if err != nil {
@@ -771,6 +1262,50 @@ func (m *SessionManager) validateIssue(issueID, workDir string) error {
 	if beads.IssueStatus(issues[0].Status).IsTerminal() {
 		return fmt.Errorf("%w: %s has terminal status %s", ErrIssueInvalid, issueID, issues[0].Status)
 	}
+	return m.validateVSDDDispatch(issueID, bdWorkDir)
+}
+
+func (m *SessionManager) validateVSDDDispatch(issueID, workDir string) error {
+	bd := beads.New(workDir)
+	issue, err := bd.Show(issueID)
+	if err != nil {
+		return nil
+	}
+	phase := beads.ParseVSDDPhaseFields(issue)
+	artifacts := beads.ParseVSDDArtifactFields(issue)
+	if phase == nil && artifacts == nil {
+		return nil
+	}
+	if phase == nil {
+		phase = &beads.VSDDPhaseFields{}
+	}
+	target := phase.Phase
+	if target == "" {
+		target = beads.VSDDPhaseSpec
+	}
+	if err := beads.ValidateDispatchGate(phase, artifacts, target); err != nil {
+		phaseCopy := *phase
+		phaseCopy.LastRejection = err.Error()
+		phaseCopy.LastTransition = fmt.Sprintf("blocked:%s", target)
+		description := beads.PersistVSDDState(issue, &phaseCopy, artifacts)
+		_ = bd.Update(issueID, beads.UpdateOptions{Description: &description})
+		return fmt.Errorf("%w: %s blocked by vsdd gate (%v)", ErrIssueInvalid, issueID, err)
+	}
+	if target == beads.VSDDPhaseConvergence || target == beads.VSDDPhaseDone {
+		if err := beads.ValidateReviewVerdictContract(phase); err != nil {
+			phaseCopy := *phase
+			phaseCopy.LastRejection = err.Error()
+			phaseCopy.LastTransition = fmt.Sprintf("blocked:%s", target)
+			description := beads.PersistVSDDState(issue, &phaseCopy, artifacts)
+			_ = bd.Update(issueID, beads.UpdateOptions{Description: &description})
+			return fmt.Errorf("%w: %s blocked by review contract (%v)", ErrIssueInvalid, issueID, err)
+		}
+	}
+	nextPhase := *phase
+	nextPhase.LastRejection = ""
+	nextPhase.LastTransition = fmt.Sprintf("dispatch-ready:%s", target)
+	description := beads.PersistVSDDState(issue, &nextPhase, artifacts)
+	_ = bd.Update(issueID, beads.UpdateOptions{Description: &description})
 	return nil
 }
 

@@ -76,5 +76,9 @@ result
 # Opencode
 .opencode/
 
+# Copilot local state
+.copilot/
+
 # Gas Town (added by gt)
 __pycache__/
+.land-worktree/

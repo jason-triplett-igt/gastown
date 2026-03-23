@@ -157,7 +157,7 @@ func TestStartupFallbackCommands_AutonomousRole(t *testing.T) {
 		},
 	}
 
-	autonomousRoles := []string{"polecat", "witness", "refinery", "deacon"}
+	autonomousRoles := []string{"polecat", "crew", "witness", "refinery", "dog"}
 	for _, role := range autonomousRoles {
 		t.Run(role, func(t *testing.T) {
 			commands := StartupFallbackCommands(role, rc)
@@ -186,7 +186,7 @@ func TestStartupFallbackCommands_NonAutonomousRole(t *testing.T) {
 		},
 	}
 
-	nonAutonomousRoles := []string{"mayor", "crew", "keeper"}
+	nonAutonomousRoles := []string{"mayor", "deacon", "keeper"}
 	for _, role := range nonAutonomousRoles {
 		t.Run(role, func(t *testing.T) {
 			commands := StartupFallbackCommands(role, rc)

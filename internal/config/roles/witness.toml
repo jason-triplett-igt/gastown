@@ -1,10 +1,13 @@
 # Witness role definition
-# Per-rig worker monitor with progressive nudging. One per rig.
+# Fresh-context reviewer and health monitor per rig.
 
 role = "witness"
 scope = "rig"
-nudge = "Run 'gt prime' to check worker status and begin patrol cycle."
+nudge = "Check current rig state and inspect active work."
 prompt_template = "witness.md.tmpl"
+profile = "reviewer"
+hook_policy = "reviewer"
+allowed_tools = ["bd_show", "load_review", "run_verification"]
 
 [session]
 pattern = "{prefix}-witness"

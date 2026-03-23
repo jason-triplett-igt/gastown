@@ -3,7 +3,6 @@ package runtime
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -11,6 +10,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/hooks"
 	"github.com/steveyegge/gastown/internal/hookutil"
+	"github.com/steveyegge/gastown/internal/sessionenv"
 	"github.com/steveyegge/gastown/internal/templates/commands"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -65,21 +65,7 @@ type startupPromptSession interface {
 // It checks GT_SESSION_ID_ENV first, then resolves from the current agent's preset,
 // and falls back to CLAUDE_SESSION_ID for backwards compatibility.
 func SessionIDFromEnv() string {
-	if envName := os.Getenv("GT_SESSION_ID_ENV"); envName != "" {
-		if sessionID := os.Getenv(envName); sessionID != "" {
-			return sessionID
-		}
-	}
-	// Use the current agent's session ID env var from its preset
-	if agentName := os.Getenv("GT_AGENT"); agentName != "" {
-		if preset := config.GetAgentPresetByName(agentName); preset != nil && preset.SessionIDEnv != "" {
-			if sessionID := os.Getenv(preset.SessionIDEnv); sessionID != "" {
-				return sessionID
-			}
-		}
-	}
-	// Backwards-compatible fallback for sessions without GT_AGENT
-	return os.Getenv("CLAUDE_SESSION_ID")
+	return sessionenv.SessionIDFromEnv()
 }
 
 // StartupFallbackCommands returns commands that approximate Claude hooks when hooks are unavailable.

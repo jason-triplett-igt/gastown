@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/mayor"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -220,13 +221,32 @@ func runMayorAttach(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
+	state, _ := mgr.LifecycleState()
 	if !running {
 		// Auto-start if not running
 		fmt.Println("Mayor session not running, starting...")
 		if err := mgr.Start(mayorAgentOverride); err != nil {
 			return err
 		}
+		state, _ = mgr.LifecycleState()
+		running, _ = mgr.IsRunning()
+		if state != "" && state != runtime.SessionLifecycleRunning {
+			fmt.Printf("Mayor is running in %s state; pane attach is unavailable for this runtime. Use `gt mayor status` to monitor it.\n", state)
+			return nil
+		}
+		if state == runtime.SessionLifecycleRunning {
+			fmt.Println("Mayor is running headlessly via external runtime; pane attach is unavailable. Use `gt mayor status` to monitor it.")
+			return nil
+		}
 	} else {
+		if state != "" && state != runtime.SessionLifecycleRunning {
+			fmt.Printf("Mayor is running in %s state; pane attach is unavailable for this runtime. Use `gt mayor status` to monitor it.\n", state)
+			return nil
+		}
+		if state == runtime.SessionLifecycleRunning {
+			fmt.Println("Mayor is running headlessly via external runtime; pane attach is unavailable. Use `gt mayor status` to monitor it.")
+			return nil
+		}
 		// Session exists - check if runtime is still running (hq-95xfq, gt-7zl)
 		// If runtime exited or sitting at shell, restart with proper context.
 		// Use IsAgentAlive (checks descendant processes) instead of IsAgentRunning
@@ -353,6 +373,9 @@ func runMayorStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s Mayor (tmux) is %s\n",
 			style.Bold.Render("●"),
 			style.Bold.Render("running"))
+		if status.State != "" && status.State != runtime.SessionLifecycleRunning {
+			fmt.Printf("  State: %s\n", status.State)
+		}
 		fmt.Printf("  Status: %s\n", attachedStatus)
 		fmt.Printf("  Created: %s\n", status.Tmux.Created)
 	}
@@ -364,7 +387,7 @@ func runMayorStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  PID: %d\n", status.ACPPid)
 	}
 
-	if status.Tmux != nil {
+	if status.Tmux != nil && (status.State == "" || status.State == runtime.SessionLifecycleRunning) {
 		fmt.Printf("\nAttach with: %s\n", style.Dim.Render("gt mayor attach"))
 	} else if status.ACPPid != 0 {
 		fmt.Printf("\nAttach with: %s\n", style.Dim.Render("gt mayor acp"))

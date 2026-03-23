@@ -1,6 +1,7 @@
 package deacon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/toolcallbacks"
 )
 
 // Common errors
@@ -43,6 +45,12 @@ type tmuxOps interface {
 type Manager struct {
 	townRoot string
 	tmux     tmuxOps
+	adapter  runtimeSessionStarter
+}
+
+type runtimeSessionStarter interface {
+	Start(context.Context, runtime.SessionLaunchRequest) (runtime.ManagedSession, error)
+	Lookup(context.Context, runtime.SessionLookupRequest) (runtime.ManagedSession, error)
 }
 
 // NewManager creates a new deacon manager for a town.
@@ -51,6 +59,104 @@ func NewManager(townRoot string) *Manager {
 		townRoot: townRoot,
 		tmux:     tmux.NewTmux(),
 	}
+}
+
+func (m *Manager) sessionAdapter() runtimeSessionStarter {
+	if m.adapter != nil {
+		return m.adapter
+	}
+	adapter := runtime.NewTmuxSessionAdapter(tmux.NewTmux())
+	return adapter.WithBindingStore(runtime.NewFileSessionBindingStore(m.townRoot))
+}
+
+func (m *Manager) loadDeaconBinding() (*runtime.SessionBinding, error) {
+	store := runtime.NewFileSessionBindingStore(m.townRoot)
+	binding, err := store.Load(context.Background(), "", "deacon", "", "deacon")
+	if err != nil {
+		return nil, fmt.Errorf("loading deacon binding: %w", err)
+	}
+	return binding, nil
+}
+
+func (m *Manager) saveDeaconBinding(binding runtime.SessionBinding) error {
+	store := runtime.NewFileSessionBindingStore(m.townRoot)
+	if err := store.Save(context.Background(), binding); err != nil {
+		return fmt.Errorf("saving deacon binding: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) deleteDeaconBinding() error {
+	binding, err := m.loadDeaconBinding()
+	if err != nil {
+		return err
+	}
+	if binding == nil {
+		return nil
+	}
+	store := runtime.NewFileSessionBindingStore(m.townRoot)
+	if err := store.Delete(context.Background(), binding.IssueID, binding.Role, binding.RigName, binding.AgentName); err != nil {
+		return fmt.Errorf("deleting deacon binding: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) markDeaconStopping() error {
+	binding, err := m.loadDeaconBinding()
+	if err != nil {
+		return err
+	}
+	if binding == nil {
+		return nil
+	}
+	binding.LifecycleState = runtime.SessionLifecycleStopping
+	binding.UpdatedAt = time.Now().UTC()
+	return m.saveDeaconBinding(*binding)
+}
+
+func (m *Manager) lifecycleState() (string, error) {
+	binding, err := m.loadDeaconBinding()
+	if err != nil || binding == nil {
+		return "", err
+	}
+	return binding.LifecycleState, nil
+}
+
+func (m *Manager) lookupManagedSession(sessionName string) (runtime.ManagedSession, error) {
+	binding, err := m.loadDeaconBinding()
+	if err != nil {
+		return nil, err
+	}
+	if binding == nil || binding.SessionName != sessionName || binding.RuntimeSessionID == "" {
+		return nil, nil
+	}
+	return m.sessionAdapter().Lookup(context.Background(), runtime.SessionLookupRequest{
+		SessionID:   binding.RuntimeSessionID,
+		Provider:    binding.Provider,
+		IssueID:     binding.IssueID,
+		SessionName: binding.SessionName,
+		Role:        binding.Role,
+		TownRoot:    m.townRoot,
+		AgentName:   binding.AgentName,
+		WorkDir:     binding.WorkDir,
+		Metadata:    binding.Metadata,
+	})
+}
+
+// LifecycleState returns the current deacon lifecycle state.
+func (m *Manager) LifecycleState() (string, error) {
+	binding, bindErr := m.loadDeaconBinding()
+	if bindErr == nil && binding != nil {
+		if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+			status, statusErr := managed.Status(context.Background())
+			return runtime.DeriveLifecycleState(binding, status.Alive, statusErr), nil
+		}
+		return runtime.DeriveLifecycleState(binding, false, fmt.Errorf("runtime status unavailable")), nil
+	}
+	if running, err := m.tmux.HasSession(m.SessionName()); err == nil && running {
+		return runtime.SessionLifecycleRunning, nil
+	}
+	return runtime.SessionLifecycleStopped, nil
 }
 
 // SessionName returns the tmux session name for the deacon.
@@ -104,6 +210,7 @@ func (m *Manager) Start(agentOverride string) error {
 	if err := runtime.EnsureSettingsForRole(deaconDir, deaconDir, "deacon", runtimeConfig); err != nil {
 		return fmt.Errorf("ensuring runtime settings: %w", err)
 	}
+	resolvedAgentUsesAdapter := agentOverride != "" || !config.IsResolvedAgentClaude(runtimeConfig)
 
 	initialPrompt := session.BuildStartupPrompt(session.BeaconConfig{
 		Recipient: "deacon",
@@ -119,6 +226,26 @@ func (m *Manager) Start(agentOverride string) error {
 	}, "", initialPrompt, agentOverride)
 	if err != nil {
 		return fmt.Errorf("building startup command: %w", err)
+	}
+
+	if resolvedAgentUsesAdapter {
+		if _, err := m.sessionAdapter().Start(context.Background(), runtime.SessionLaunchRequest{
+			Provider:             agentOverride,
+			IssueID:              sessionID,
+			SessionName:          sessionID,
+			Role:                 "deacon",
+			SessionKind:          config.ToolSessionKindPatrol,
+			TownRoot:             m.townRoot,
+			AgentName:            "deacon",
+			WorkDir:              deaconDir,
+			Prompt:               initialPrompt,
+			AcceptStartupDialogs: true,
+			ToolPolicy:           deaconToolPolicyPtr(config.ResolveToolPolicyForSession(m.townRoot, "", "deacon", config.ToolSessionKindPatrol, deaconDir)),
+			ToolCallbacks:        toolcallbacks.ForTown(m.townRoot, deaconDir),
+		}); err != nil {
+			return fmt.Errorf("starting deacon runtime session: %w", err)
+		}
+		return nil
 	}
 
 	// Create session with command directly to avoid send-keys race condition.
@@ -184,8 +311,22 @@ func (m *Manager) Start(agentOverride string) error {
 	return nil
 }
 
+func deaconToolPolicyPtr(policy config.ToolPolicy) *config.ToolPolicy {
+	return &policy
+}
+
 // Stop stops the deacon session.
 func (m *Manager) Stop() error {
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil && status.Alive {
+			_ = m.markDeaconStopping()
+			if err := managed.Close(context.Background()); err != nil {
+				return err
+			}
+			return m.deleteDeaconBinding()
+		}
+	}
 	t := m.tmux
 	sessionID := m.SessionName()
 
@@ -214,11 +355,32 @@ func (m *Manager) Stop() error {
 
 // IsRunning checks if the deacon session is active.
 func (m *Manager) IsRunning() (bool, error) {
+	if state, err := m.lifecycleState(); err == nil && state == runtime.SessionLifecycleStopping {
+		return false, nil
+	}
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil {
+			return status.Alive, nil
+		}
+	}
 	return m.tmux.HasSession(m.SessionName())
 }
 
 // Status returns information about the deacon session.
 func (m *Manager) Status() (*tmux.SessionInfo, error) {
+	if state, err := m.lifecycleState(); err == nil && state == runtime.SessionLifecycleStopping {
+		return &tmux.SessionInfo{Name: m.SessionName()}, nil
+	}
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil {
+			if !status.Alive {
+				return nil, ErrNotRunning
+			}
+			return &tmux.SessionInfo{Name: m.SessionName()}, nil
+		}
+	}
 	t := m.tmux
 	sessionID := m.SessionName()
 

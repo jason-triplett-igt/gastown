@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
@@ -276,6 +277,37 @@ func deliverNudge(t *tmux.Tmux, sessionName, message, sender string) error {
 		}
 		return t.NudgeSessionWithOpts(sessionName, prefixedMessage, opts)
 	}
+}
+
+func managedSessionForNudge(townRoot, sessionName string) (runtime.ManagedSession, *runtime.SessionBinding, error) {
+	if strings.TrimSpace(townRoot) == "" || strings.TrimSpace(sessionName) == "" {
+		return nil, nil, nil
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	binding, err := store.Load(context.Background(), sessionName, "", "", "")
+	if err != nil || binding == nil {
+		return nil, nil, err
+	}
+	if binding.SessionName != sessionName || strings.TrimSpace(binding.RuntimeSessionID) == "" {
+		return nil, nil, nil
+	}
+	adapter := runtime.NewTmuxSessionAdapter(tmux.NewTmux()).WithBindingStore(store)
+	managed, err := adapter.Lookup(context.Background(), runtime.SessionLookupRequest{
+		SessionID:   binding.RuntimeSessionID,
+		Provider:    binding.Provider,
+		IssueID:     binding.IssueID,
+		SessionName: binding.SessionName,
+		Role:        binding.Role,
+		TownRoot:    townRoot,
+		RigName:     binding.RigName,
+		AgentName:   binding.AgentName,
+		WorkDir:     binding.WorkDir,
+		Metadata:    binding.Metadata,
+	})
+	if err != nil {
+		return nil, binding, err
+	}
+	return managed, binding, nil
 }
 
 // watchAndDeliver polls a session for idle state over idleWatcherTimeout.
@@ -577,7 +609,22 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 				return fmt.Errorf("checking session: %w", err)
 			}
 			if !exists {
-				return fmt.Errorf("session %q not found", target)
+				managed, _, managedErr := managedSessionForNudge(townRoot, target)
+				if managedErr != nil {
+					return fmt.Errorf("checking managed session: %w", managedErr)
+				}
+				if managed == nil {
+					return fmt.Errorf("session %q not found", target)
+				}
+				if err := managed.Send(context.Background(), fmt.Sprintf("[from %s] %s", sender, message)); err != nil {
+					return fmt.Errorf("nudging managed session: %w", err)
+				}
+				fmt.Printf("✓ Nudged %s (%s)\n", target, "managed")
+				if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
+					_ = LogNudge(townRoot, target, message)
+				}
+				_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", target, message))
+				return nil
 			}
 		}
 

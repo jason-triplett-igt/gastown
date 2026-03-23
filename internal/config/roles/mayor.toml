@@ -5,6 +5,9 @@ role = "mayor"
 scope = "town"
 nudge = "Check mail and hook status, then act accordingly."
 prompt_template = "mayor.md.tmpl"
+profile = "orchestrator"
+hook_policy = "orchestrator"
+allowed_tools = ["bd_show", "bd_ready", "bd_update", "bd_close", "bd_create", "nudge_agent", "send_mail"]
 
 [session]
 pattern = "hq-mayor"

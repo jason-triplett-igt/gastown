@@ -5,6 +5,9 @@ role = "refinery"
 scope = "rig"
 nudge = "Run 'gt prime' to check merge queue and begin processing."
 prompt_template = "refinery.md.tmpl"
+profile = "reviewer"
+hook_policy = "reviewer"
+allowed_tools = ["bd_show", "load_review", "run_verification"]
 
 [session]
 pattern = "{prefix}-refinery"

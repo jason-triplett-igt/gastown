@@ -9,60 +9,60 @@ import (
 
 func TestLoadBuiltinRoleDefinition(t *testing.T) {
 	tests := []struct {
-		name          string
-		role          string
-		wantScope     string
-		wantPattern   string
-		wantPreSync   bool
+		name        string
+		role        string
+		wantScope   string
+		wantPattern string
+		wantPreSync bool
 	}{
 		{
-			name:          "mayor",
-			role:          "mayor",
-			wantScope:     "town",
-			wantPattern:   "hq-mayor",
-			wantPreSync:   false,
+			name:        "mayor",
+			role:        "mayor",
+			wantScope:   "town",
+			wantPattern: "hq-mayor",
+			wantPreSync: false,
 		},
 		{
-			name:          "deacon",
-			role:          "deacon",
-			wantScope:     "town",
-			wantPattern:   "hq-deacon",
-			wantPreSync:   false,
+			name:        "deacon",
+			role:        "deacon",
+			wantScope:   "town",
+			wantPattern: "hq-deacon",
+			wantPreSync: false,
 		},
 		{
-			name:          "witness",
-			role:          "witness",
-			wantScope:     "rig",
-			wantPattern:   "{prefix}-witness",
-			wantPreSync:   false,
+			name:        "witness",
+			role:        "witness",
+			wantScope:   "rig",
+			wantPattern: "{prefix}-witness",
+			wantPreSync: false,
 		},
 		{
-			name:          "refinery",
-			role:          "refinery",
-			wantScope:     "rig",
-			wantPattern:   "{prefix}-refinery",
-			wantPreSync:   true,
+			name:        "refinery",
+			role:        "refinery",
+			wantScope:   "rig",
+			wantPattern: "{prefix}-refinery",
+			wantPreSync: true,
 		},
 		{
-			name:          "polecat",
-			role:          "polecat",
-			wantScope:     "rig",
-			wantPattern:   "{prefix}-{name}",
-			wantPreSync:   false,
+			name:        "polecat",
+			role:        "polecat",
+			wantScope:   "rig",
+			wantPattern: "{prefix}-{name}",
+			wantPreSync: false,
 		},
 		{
-			name:          "crew",
-			role:          "crew",
-			wantScope:     "rig",
-			wantPattern:   "{prefix}-crew-{name}",
-			wantPreSync:   true,
+			name:        "crew",
+			role:        "crew",
+			wantScope:   "rig",
+			wantPattern: "{prefix}-crew-{name}",
+			wantPreSync: true,
 		},
 		{
-			name:          "dog",
-			role:          "dog",
-			wantScope:     "town",
-			wantPattern:   "gt-dog-{name}",
-			wantPreSync:   false,
+			name:        "dog",
+			role:        "dog",
+			wantScope:   "town",
+			wantPattern: "gt-dog-{name}",
+			wantPreSync: false,
 		},
 	}
 
@@ -323,3 +323,100 @@ func TestLoadRoleDefinition_NoOverrideFiles(t *testing.T) {
 	}
 }
 
+func TestLoadBuiltinRoleDefinition_ProfileHookPolicyAndAllowedTools(t *testing.T) {
+	tests := []struct {
+		role              string
+		wantProfile       string
+		wantHookPolicy    string
+		wantAllowedTool   string
+		wantDisallowedLen bool
+	}{
+		{role: "polecat", wantProfile: "builder", wantHookPolicy: "builder", wantAllowedTool: "run_single_test"},
+		{role: "witness", wantProfile: "reviewer", wantHookPolicy: "reviewer", wantAllowedTool: "load_review"},
+		{role: "mayor", wantProfile: "orchestrator", wantHookPolicy: "orchestrator", wantAllowedTool: "send_mail"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.role, func(t *testing.T) {
+			def, err := loadBuiltinRoleDefinition(tt.role)
+			if err != nil {
+				t.Fatalf("loadBuiltinRoleDefinition(%s) error: %v", tt.role, err)
+			}
+			if def.Profile != tt.wantProfile {
+				t.Fatalf("Profile = %q, want %q", def.Profile, tt.wantProfile)
+			}
+			if def.HookPolicy != tt.wantHookPolicy {
+				t.Fatalf("HookPolicy = %q, want %q", def.HookPolicy, tt.wantHookPolicy)
+			}
+			if len(def.AllowedTools) == 0 {
+				t.Fatal("AllowedTools should not be empty")
+			}
+			found := false
+			for _, tool := range def.AllowedTools {
+				if tool == tt.wantAllowedTool {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("AllowedTools = %#v, want to include %q", def.AllowedTools, tt.wantAllowedTool)
+			}
+		})
+	}
+}
+
+func TestRoleHelpers_DefaultProfilesPoliciesAndTools(t *testing.T) {
+	if got := RoleProfile("", "", "crew"); got != "builder" {
+		t.Fatalf("RoleProfile(crew) = %q, want builder", got)
+	}
+	if got := RoleHookPolicy("", "", "refinery"); got != "reviewer" {
+		t.Fatalf("RoleHookPolicy(refinery) = %q, want reviewer", got)
+	}
+	tools := RoleAllowedTools("", "", "deacon")
+	if len(tools) == 0 {
+		t.Fatal("RoleAllowedTools(deacon) should not be empty")
+	}
+	found := false
+	for _, tool := range tools {
+		if tool == "bd_ready" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("RoleAllowedTools(deacon) = %#v, want bd_ready", tools)
+	}
+}
+
+func TestLoadRoleDefinition_OverrideRoleProfilePolicyAndTools(t *testing.T) {
+	townRoot := t.TempDir()
+	rigPath := t.TempDir()
+	rolesDir := rigPath + "/roles"
+	if err := os.MkdirAll(rolesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	override := strings.Join([]string{
+		`profile = "reviewer"`,
+		`hook_policy = "reviewer"`,
+		`allowed_tools = ["bd_show", "load_review"]`,
+		"",
+	}, "\n")
+	if err := os.WriteFile(rolesDir+"/crew.toml", []byte(override), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	def, err := LoadRoleDefinition(townRoot, rigPath, "crew")
+	if err != nil {
+		t.Fatalf("LoadRoleDefinition() error = %v", err)
+	}
+	if def.Profile != "reviewer" {
+		t.Fatalf("Profile = %q, want reviewer", def.Profile)
+	}
+	if def.HookPolicy != "reviewer" {
+		t.Fatalf("HookPolicy = %q, want reviewer", def.HookPolicy)
+	}
+	if strings.Join(def.AllowedTools, ",") != "bd_show,load_review" {
+		t.Fatalf("AllowedTools = %#v, want override values", def.AllowedTools)
+	}
+}

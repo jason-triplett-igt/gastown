@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -337,7 +339,13 @@ func runSessionAttach(cmd *cobra.Command, args []string) error {
 	}
 
 	// Attach (this replaces the process)
-	return polecatMgr.Attach(polecatName)
+	if err := polecatMgr.Attach(polecatName); err != nil {
+		if errors.Is(err, polecat.ErrInteractionUnsupported) {
+			return fmt.Errorf("attaching session: %w (external runtime sessions cannot be attached via tmux)", err)
+		}
+		return err
+	}
+	return nil
 }
 
 // SessionListItem represents a session in list output.
@@ -453,6 +461,9 @@ func runSessionCapture(cmd *cobra.Command, args []string) error {
 
 	output, err := polecatMgr.Capture(polecatName, lines)
 	if err != nil {
+		if errors.Is(err, polecat.ErrInteractionUnsupported) {
+			return fmt.Errorf("capturing output: %w (external runtime sessions do not expose tmux pane capture)", err)
+		}
 		return fmt.Errorf("capturing output: %w", err)
 	}
 
@@ -575,24 +586,50 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  State: %s\n", style.Bold.Render("● running"))
 	} else {
 		fmt.Printf("  State: %s\n", style.Dim.Render("○ stopped"))
-		return nil
 	}
 
 	fmt.Printf("  Session ID: %s\n", info.SessionID)
 
-	if info.Attached {
-		fmt.Printf("  Attached: yes\n")
-	} else {
-		fmt.Printf("  Attached: no\n")
+	if info.Running {
+		if info.Attached {
+			fmt.Printf("  Attached: yes\n")
+		} else {
+			fmt.Printf("  Attached: no\n")
+		}
 	}
 
-	if !info.Created.IsZero() {
+	if info.Running && !info.Created.IsZero() {
 		uptime := time.Since(info.Created)
 		fmt.Printf("  Created: %s\n", info.Created.Format("2006-01-02 15:04:05"))
 		fmt.Printf("  Uptime: %s\n", formatDuration(uptime))
 	}
 
-	fmt.Printf("\nAttach with: %s\n", style.Dim.Render(fmt.Sprintf("gt session at %s/%s", rigName, polecatName)))
+	if binding, err := polecatMgr.BindingForPolecat(polecatName); err == nil && binding != nil {
+		if binding.RuntimeSessionID != "" {
+			fmt.Printf("  Runtime Session ID: %s\n", binding.RuntimeSessionID)
+		}
+		if binding.Provider != "" {
+			fmt.Printf("  Provider: %s\n", binding.Provider)
+		}
+		if binding.WorkDir != "" {
+			fmt.Printf("  Work Dir: %s\n", binding.WorkDir)
+		}
+		if len(binding.Metadata) > 0 {
+			fmt.Printf("  Binding Metadata:\n")
+			keys := make([]string, 0, len(binding.Metadata))
+			for key := range binding.Metadata {
+				keys = append(keys, key)
+			}
+			slices.Sort(keys)
+			for _, key := range keys {
+				fmt.Printf("    %s=%s\n", key, binding.Metadata[key])
+			}
+		}
+	}
+
+	if info.Running {
+		fmt.Printf("\nAttach with: %s\n", style.Dim.Render(fmt.Sprintf("gt session at %s/%s", rigName, polecatName)))
+	}
 	return nil
 }
 

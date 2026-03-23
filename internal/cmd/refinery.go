@@ -10,8 +10,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/refinery"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -354,6 +355,7 @@ func runRefineryStop(cmd *cobra.Command, args []string) error {
 // RefineryStatusOutput is the JSON output format for refinery status.
 type RefineryStatusOutput struct {
 	Running     bool   `json:"running"`
+	State       string `json:"state,omitempty"`
 	RigName     string `json:"rig_name"`
 	Session     string `json:"session,omitempty"`
 	QueueLength int    `json:"queue_length"`
@@ -370,9 +372,16 @@ func runRefineryStatus(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// ZFC: tmux is source of truth for running state
+	state, _ := mgr.LifecycleState()
 	running, _ := mgr.IsRunning()
 	sessionInfo, _ := mgr.Status() // may be nil if not running
+	if state == "" {
+		if running {
+			state = runtime.SessionLifecycleRunning
+		} else {
+			state = runtime.SessionLifecycleStopped
+		}
+	}
 
 	// Get queue from beads
 	queue, _ := mgr.Queue()
@@ -382,6 +391,7 @@ func runRefineryStatus(cmd *cobra.Command, args []string) error {
 	if refineryStatusJSON {
 		output := RefineryStatusOutput{
 			Running:     running,
+			State:       state,
 			RigName:     rigName,
 			QueueLength: queueLen,
 		}
@@ -396,7 +406,22 @@ func runRefineryStatus(cmd *cobra.Command, args []string) error {
 	// Human-readable output
 	fmt.Printf("%s Refinery: %s\n\n", style.Bold.Render("⚙"), rigName)
 
-	if running {
+	if state == runtime.SessionLifecycleStarting {
+		fmt.Printf("  State: %s\n", style.Dim.Render("◔ starting"))
+		if sessionInfo != nil {
+			fmt.Printf("  Session: %s\n", sessionInfo.Name)
+		}
+	} else if state == runtime.SessionLifecycleStopping {
+		fmt.Printf("  State: %s\n", style.Dim.Render("◐ stopping"))
+		if sessionInfo != nil {
+			fmt.Printf("  Session: %s\n", sessionInfo.Name)
+		}
+	} else if state == runtime.SessionLifecycleUnknown {
+		fmt.Printf("  State: %s\n", style.Dim.Render("◌ unknown"))
+		if sessionInfo != nil {
+			fmt.Printf("  Session: %s\n", sessionInfo.Name)
+		}
+	} else if running {
 		fmt.Printf("  State: %s\n", style.Bold.Render("● running"))
 		if sessionInfo != nil {
 			fmt.Printf("  Session: %s\n", sessionInfo.Name)

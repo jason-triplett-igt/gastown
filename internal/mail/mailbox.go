@@ -17,7 +17,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/sessionenv"
 	"github.com/steveyegge/gastown/internal/telemetry"
 )
 
@@ -517,7 +517,7 @@ func (m *Mailbox) markReadBeads(id string) error {
 func (m *Mailbox) closeInDir(id, beadsDir string) error {
 	args := []string{"close", id}
 	// Pass session ID for work attribution if available
-	if sessionID := runtime.SessionIDFromEnv(); sessionID != "" {
+	if sessionID := sessionenv.SessionIDFromEnv(); sessionID != "" {
 		args = append(args, "--session="+sessionID)
 	}
 

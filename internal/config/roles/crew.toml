@@ -5,6 +5,9 @@ role = "crew"
 scope = "rig"
 nudge = "Check your hook and mail, then act accordingly."
 prompt_template = "crew.md.tmpl"
+profile = "builder"
+hook_policy = "builder"
+allowed_tools = ["bd_show", "run_single_test", "run_unit_tests"]
 
 [session]
 pattern = "{prefix}-crew-{name}"

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/sessionenv"
 	"github.com/steveyegge/gastown/internal/telemetry"
 )
 
@@ -1347,7 +1347,7 @@ func (b *Beads) Close(ids ...string) error {
 	args := append([]string{"close"}, ids...)
 
 	// Pass session ID for work attribution if available
-	if sessionID := runtime.SessionIDFromEnv(); sessionID != "" {
+	if sessionID := sessionenv.SessionIDFromEnv(); sessionID != "" {
 		args = append(args, "--session="+sessionID)
 	}
 
@@ -1367,7 +1367,7 @@ func (b *Beads) CloseWithReason(reason string, ids ...string) error {
 	args = append(args, "--reason="+reason)
 
 	// Pass session ID for work attribution if available
-	if sessionID := runtime.SessionIDFromEnv(); sessionID != "" {
+	if sessionID := sessionenv.SessionIDFromEnv(); sessionID != "" {
 		args = append(args, "--session="+sessionID)
 	}
 
@@ -1387,7 +1387,7 @@ func (b *Beads) ForceCloseWithReason(reason string, ids ...string) error {
 	args = append(args, "--reason="+reason, "--force")
 
 	// Pass session ID for work attribution if available
-	if sessionID := runtime.SessionIDFromEnv(); sessionID != "" {
+	if sessionID := sessionenv.SessionIDFromEnv(); sessionID != "" {
 		args = append(args, "--session="+sessionID)
 	}
 

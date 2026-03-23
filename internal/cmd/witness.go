@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -226,6 +227,7 @@ func runWitnessStop(cmd *cobra.Command, args []string) error {
 // WitnessStatusOutput is the JSON output format for witness status.
 type WitnessStatusOutput struct {
 	Running           bool     `json:"running"`
+	State             string   `json:"state,omitempty"`
 	RigName           string   `json:"rig_name"`
 	Session           string   `json:"session,omitempty"`
 	MonitoredPolecats []string `json:"monitored_polecats,omitempty"`
@@ -242,9 +244,16 @@ func runWitnessStatus(cmd *cobra.Command, args []string) error {
 
 	mgr := witness.NewManager(r)
 
-	// ZFC: tmux is source of truth for running state
+	state, _ := mgr.LifecycleState()
 	running, _ := mgr.IsRunning()
 	sessionInfo, _ := mgr.Status() // may be nil if not running
+	if state == "" {
+		if running {
+			state = runtime.SessionLifecycleRunning
+		} else {
+			state = runtime.SessionLifecycleStopped
+		}
+	}
 
 	// Polecats come from rig config, not state file
 	polecats := r.Polecats
@@ -253,6 +262,7 @@ func runWitnessStatus(cmd *cobra.Command, args []string) error {
 	if witnessStatusJSON {
 		output := WitnessStatusOutput{
 			Running:           running,
+			State:             state,
 			RigName:           rigName,
 			MonitoredPolecats: polecats,
 		}
@@ -267,7 +277,22 @@ func runWitnessStatus(cmd *cobra.Command, args []string) error {
 	// Human-readable output
 	fmt.Printf("%s Witness: %s\n\n", style.Bold.Render(AgentTypeIcons[AgentWitness]), rigName)
 
-	if running {
+	if state == runtime.SessionLifecycleStarting {
+		fmt.Printf("  State: %s\n", style.Dim.Render("◔ starting"))
+		if sessionInfo != nil {
+			fmt.Printf("  Session: %s\n", sessionInfo.Name)
+		}
+	} else if state == runtime.SessionLifecycleStopping {
+		fmt.Printf("  State: %s\n", style.Dim.Render("◐ stopping"))
+		if sessionInfo != nil {
+			fmt.Printf("  Session: %s\n", sessionInfo.Name)
+		}
+	} else if state == runtime.SessionLifecycleUnknown {
+		fmt.Printf("  State: %s\n", style.Dim.Render("◌ unknown"))
+		if sessionInfo != nil {
+			fmt.Printf("  Session: %s\n", sessionInfo.Name)
+		}
+	} else if running {
 		fmt.Printf("  State: %s\n", style.Bold.Render("● running"))
 		if sessionInfo != nil {
 			fmt.Printf("  Session: %s\n", sessionInfo.Name)

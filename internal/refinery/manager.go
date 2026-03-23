@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/toolcallbacks"
 )
 
 // Common errors
@@ -37,6 +38,12 @@ type Manager struct {
 	rig     *rig.Rig
 	workDir string
 	output  io.Writer // Output destination for user-facing messages
+	adapter runtimeSessionStarter
+}
+
+type runtimeSessionStarter interface {
+	Start(context.Context, runtime.SessionLaunchRequest) (runtime.ManagedSession, error)
+	Lookup(context.Context, runtime.SessionLookupRequest) (runtime.ManagedSession, error)
 }
 
 type scoredIssue struct {
@@ -64,12 +71,131 @@ func (m *Manager) SessionName() string {
 	return session.RefinerySessionName(session.PrefixFor(m.rig.Name))
 }
 
+func (m *Manager) townRoot() string {
+	if m == nil || m.rig == nil {
+		return ""
+	}
+	return filepath.Dir(m.rig.Path)
+}
+
+func (m *Manager) sessionAdapter() runtimeSessionStarter {
+	if m.adapter != nil {
+		return m.adapter
+	}
+	adapter := runtime.NewTmuxSessionAdapter(tmux.NewTmux())
+	return adapter.WithBindingStore(runtime.NewFileSessionBindingStore(m.townRoot()))
+}
+
+func (m *Manager) loadRefineryBinding() (*runtime.SessionBinding, error) {
+	if m == nil || m.rig == nil {
+		return nil, fmt.Errorf("rig is required")
+	}
+	store := runtime.NewFileSessionBindingStore(m.townRoot())
+	binding, err := store.Load(context.Background(), "", "refinery", m.rig.Name, "refinery")
+	if err != nil {
+		return nil, fmt.Errorf("loading refinery binding: %w", err)
+	}
+	return binding, nil
+}
+
+func (m *Manager) lookupManagedSession(sessionName string) (runtime.ManagedSession, error) {
+	binding, err := m.loadRefineryBinding()
+	if err != nil {
+		return nil, err
+	}
+	if binding == nil || binding.SessionName != sessionName || binding.RuntimeSessionID == "" {
+		return nil, nil
+	}
+	return m.sessionAdapter().Lookup(context.Background(), runtime.SessionLookupRequest{
+		SessionID:   binding.RuntimeSessionID,
+		Provider:    binding.Provider,
+		IssueID:     binding.IssueID,
+		SessionName: binding.SessionName,
+		Role:        binding.Role,
+		TownRoot:    m.townRoot(),
+		RigName:     m.rig.Name,
+		RigPath:     m.rig.Path,
+		AgentName:   binding.AgentName,
+		WorkDir:     binding.WorkDir,
+		Metadata:    binding.Metadata,
+	})
+}
+
+func (m *Manager) deleteRefineryBinding() error {
+	binding, err := m.loadRefineryBinding()
+	if err != nil {
+		return err
+	}
+	if binding == nil {
+		return nil
+	}
+	store := runtime.NewFileSessionBindingStore(m.townRoot())
+	if err := store.Delete(context.Background(), binding.IssueID, binding.Role, binding.RigName, binding.AgentName); err != nil {
+		return fmt.Errorf("deleting refinery binding: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) saveRefineryBinding(binding runtime.SessionBinding) error {
+	store := runtime.NewFileSessionBindingStore(m.townRoot())
+	if err := store.Save(context.Background(), binding); err != nil {
+		return fmt.Errorf("saving refinery binding: %w", err)
+	}
+	return nil
+}
+
+func (m *Manager) markRefineryStopping() error {
+	binding, err := m.loadRefineryBinding()
+	if err != nil {
+		return err
+	}
+	if binding == nil {
+		return nil
+	}
+	binding.LifecycleState = runtime.SessionLifecycleStopping
+	binding.UpdatedAt = time.Now().UTC()
+	return m.saveRefineryBinding(*binding)
+}
+
+func (m *Manager) lifecycleState() (string, error) {
+	binding, err := m.loadRefineryBinding()
+	if err != nil || binding == nil {
+		return "", err
+	}
+	return binding.LifecycleState, nil
+}
+
+// LifecycleState returns the current refinery lifecycle state.
+func (m *Manager) LifecycleState() (string, error) {
+	binding, bindErr := m.loadRefineryBinding()
+	if bindErr == nil && binding != nil {
+		if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+			status, statusErr := managed.Status(context.Background())
+			return runtime.DeriveLifecycleState(binding, status.Alive, statusErr), nil
+		}
+		return runtime.DeriveLifecycleState(binding, false, fmt.Errorf("runtime status unavailable")), nil
+	}
+	if tmux.NewTmux().CheckSessionHealth(m.SessionName(), 0) == tmux.SessionHealthy {
+		return runtime.SessionLifecycleRunning, nil
+	}
+	return runtime.SessionLifecycleStopped, nil
+}
+
 // IsRunning checks if the refinery session is active and healthy.
 // Checks both tmux session existence AND agent process liveness to avoid
 // reporting zombie sessions (tmux alive but Claude dead) as "running".
 // ZFC: tmux session existence is the source of truth for session state,
 // but agent liveness determines if the session is actually functional.
 func (m *Manager) IsRunning() (bool, error) {
+	if state, err := m.lifecycleState(); err == nil && state == runtime.SessionLifecycleStopping {
+		return false, nil
+	}
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil {
+			return status.Alive, nil
+		}
+	}
 	t := tmux.NewTmux()
 	sessionName := m.SessionName()
 	status := t.CheckSessionHealth(sessionName, 0)
@@ -82,6 +208,18 @@ func (m *Manager) IsRunning() (bool, error) {
 // Returns the detailed ZombieStatus for callers that need to distinguish
 // between different failure modes.
 func (m *Manager) IsHealthy(maxInactivity time.Duration) tmux.ZombieStatus {
+	if state, err := m.lifecycleState(); err == nil && state == runtime.SessionLifecycleStopping {
+		return tmux.SessionDead
+	}
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil {
+			if status.Alive {
+				return tmux.SessionHealthy
+			}
+			return tmux.SessionDead
+		}
+	}
 	t := tmux.NewTmux()
 	return t.CheckSessionHealth(m.SessionName(), maxInactivity)
 }
@@ -89,6 +227,18 @@ func (m *Manager) IsHealthy(maxInactivity time.Duration) tmux.ZombieStatus {
 // Status returns information about the refinery session.
 // ZFC-compliant: tmux session is the source of truth.
 func (m *Manager) Status() (*tmux.SessionInfo, error) {
+	if state, err := m.lifecycleState(); err == nil && state == runtime.SessionLifecycleStopping {
+		return &tmux.SessionInfo{Name: m.SessionName()}, nil
+	}
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil {
+			if !status.Alive {
+				return nil, ErrNotRunning
+			}
+			return &tmux.SessionInfo{Name: m.SessionName()}, nil
+		}
+	}
 	t := tmux.NewTmux()
 	sessionID := m.SessionName()
 
@@ -133,9 +283,6 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 
 	// Note: No PID check per ZFC - tmux session is the source of truth
 
-	// Background mode: spawn a Claude agent in a tmux session
-	// The Claude agent handles MR processing using git commands and beads
-
 	// Working directory is the refinery worktree (shares .git with mayor/polecats).
 	// If the worktree is missing (pruned, deleted, or corrupted), auto-repair it
 	// from the shared bare repo (.repo.git) instead of falling back to mayor/rig.
@@ -152,7 +299,7 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 
 	// Ensure runtime settings exist in the shared refinery parent directory.
 	// Settings are passed to Claude Code via --settings flag.
-	townRoot := filepath.Dir(m.rig.Path)
+	townRoot := m.townRoot()
 	runtimeConfig := config.ResolveRoleAgentConfig("refinery", townRoot, m.rig.Path)
 	refinerySettingsDir := config.RoleSettingsDir("refinery", m.rig.Path)
 	if err := runtime.EnsureSettingsForRole(refinerySettingsDir, refineryRigDir, "refinery", runtimeConfig); err != nil {
@@ -170,6 +317,8 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		Topic:     "patrol",
 	}, "Run `gt prime --hook` and begin patrol.")
 
+	resolvedAgentUsesAdapter := agentOverride != "" || !config.IsResolvedAgentClaude(runtimeConfig)
+
 	command, err := config.BuildStartupCommandFromConfig(config.AgentEnvConfig{
 		Role:        "refinery",
 		Rig:         m.rig.Name,
@@ -185,10 +334,34 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 	// Generate the GASTA run ID for this refinery session.
 	runID := uuid.New().String()
 
-	// Create session with command directly to avoid send-keys race condition.
-	// See: https://github.com/anthropics/gastown/issues/280
-	if err := t.NewSessionWithCommand(sessionID, refineryRigDir, command); err != nil {
-		return fmt.Errorf("creating tmux session: %w", err)
+	if resolvedAgentUsesAdapter {
+		if _, err := m.sessionAdapter().Start(context.Background(), runtime.SessionLaunchRequest{
+			Provider:    agentOverride,
+			IssueID:     sessionID,
+			SessionName: sessionID,
+			Role:        "refinery",
+			SessionKind: config.ToolSessionKindPatrol,
+			TownRoot:    townRoot,
+			RigName:     m.rig.Name,
+			RigPath:     m.rig.Path,
+			AgentName:   "refinery",
+			WorkDir:     refineryRigDir,
+			Prompt:      initialPrompt,
+			Env: map[string]string{
+				"GT_REFINERY": "1",
+			},
+			AcceptStartupDialogs: true,
+			ToolPolicy:           refineryToolPolicyPtr(config.ResolveToolPolicyForSession(townRoot, m.rig.Path, "refinery", config.ToolSessionKindPatrol, refineryRigDir)),
+			ToolCallbacks:        toolcallbacks.ForTown(townRoot, refineryRigDir),
+		}); err != nil {
+			return fmt.Errorf("starting refinery runtime session: %w", err)
+		}
+	} else {
+		// Create session with command directly to avoid send-keys race condition.
+		// See: https://github.com/anthropics/gastown/issues/280
+		if err := t.NewSessionWithCommand(sessionID, refineryRigDir, command); err != nil {
+			return fmt.Errorf("creating tmux session: %w", err)
+		}
 	}
 
 	// Set environment variables (non-fatal: session works without these)
@@ -206,32 +379,42 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 	envVars["GT_REFINERY"] = "1"
 
 	// Set all env vars in tmux session (for debugging) and they'll also be exported to Claude
-	for k, v := range envVars {
-		_ = t.SetEnvironment(sessionID, k, v)
+	if !resolvedAgentUsesAdapter {
+		for k, v := range envVars {
+			_ = t.SetEnvironment(sessionID, k, v)
+		}
+		_ = t.SetEnvironment(sessionID, "GT_RUN", runID)
 	}
-	_ = t.SetEnvironment(sessionID, "GT_RUN", runID)
 
 	// Apply theme (non-fatal: theming failure doesn't affect operation)
-	theme := tmux.ResolveSessionTheme(townRoot, m.rig.Name, "refinery")
-	_ = t.ConfigureGasTownSession(sessionID, theme, m.rig.Name, "refinery", "refinery")
+	if !resolvedAgentUsesAdapter {
+		theme := tmux.ResolveSessionTheme(townRoot, m.rig.Name, "refinery")
+		_ = t.ConfigureGasTownSession(sessionID, theme, m.rig.Name, "refinery", "refinery")
+	}
 
 	// Accept startup dialogs (workspace trust + bypass permissions) if they appear.
 	// Must be before WaitForRuntimeReady to avoid race where dialog blocks prompt detection.
-	_ = t.AcceptStartupDialogs(sessionID)
+	if !resolvedAgentUsesAdapter {
+		_ = t.AcceptStartupDialogs(sessionID)
+	}
 
 	// Wait for Claude to start and show its prompt - fatal if Claude fails to launch
 	// WaitForRuntimeReady waits for the runtime to be ready
-	if err := t.WaitForRuntimeReady(sessionID, runtimeConfig, constants.ClaudeStartTimeout); err != nil {
-		// Kill the zombie session before returning error
-		_ = t.KillSessionWithProcesses(sessionID)
-		return fmt.Errorf("waiting for refinery to start: %w", err)
+	if !resolvedAgentUsesAdapter {
+		if err := t.WaitForRuntimeReady(sessionID, runtimeConfig, constants.ClaudeStartTimeout); err != nil {
+			// Kill the zombie session before returning error
+			_ = t.KillSessionWithProcesses(sessionID)
+			return fmt.Errorf("waiting for refinery to start: %w", err)
+		}
 	}
 
-	_ = runtime.RunStartupFallback(t, sessionID, "refinery", runtimeConfig)
-	_ = runtime.DeliverStartupPromptFallback(t, sessionID, initialPrompt, runtimeConfig, constants.ClaudeStartTimeout)
+	if !resolvedAgentUsesAdapter {
+		_ = runtime.RunStartupFallback(t, sessionID, "refinery", runtimeConfig)
+		_ = runtime.DeliverStartupPromptFallback(t, sessionID, initialPrompt, runtimeConfig, constants.ClaudeStartTimeout)
+	}
 
 	// Stream refinery's Claude Code JSONL conversation log to VictoriaLogs (opt-in).
-	if os.Getenv("GT_LOG_AGENT_OUTPUT") == "true" && os.Getenv("GT_OTEL_LOGS_URL") != "" {
+	if !resolvedAgentUsesAdapter && os.Getenv("GT_LOG_AGENT_OUTPUT") == "true" && os.Getenv("GT_OTEL_LOGS_URL") != "" {
 		if err := session.ActivateAgentLogging(sessionID, refineryRigDir, runID); err != nil {
 			log.Printf("warning: agent log watcher setup failed for %s: %v", sessionID, err)
 		}
@@ -244,6 +427,10 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 	return nil
 }
 
+func refineryToolPolicyPtr(policy config.ToolPolicy) *config.ToolPolicy {
+	return &policy
+}
+
 // repairRefineryWorktree recreates a missing refinery/rig worktree from the
 // shared bare repo (.repo.git). The refinery worktree is created during
 // `gt rig add` but can be lost if `git worktree prune` runs, the directory
@@ -252,7 +439,16 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 func (m *Manager) repairRefineryWorktree(refineryRigDir string) error {
 	bareRepoPath := filepath.Join(m.rig.Path, ".repo.git")
 	if _, err := os.Stat(bareRepoPath); os.IsNotExist(err) {
-		return fmt.Errorf("bare repo not found at %s", bareRepoPath)
+		if cfg, cfgErr := rig.LoadRigConfig(m.rig.Path); cfgErr == nil && strings.TrimSpace(cfg.LocalRepo) != "" {
+			candidate := filepath.Join(strings.TrimSpace(cfg.LocalRepo), ".git")
+			if _, statErr := os.Stat(candidate); statErr == nil {
+				bareRepoPath = candidate
+			} else {
+				return fmt.Errorf("bare repo not found at %s and local_repo fallback missing at %s", bareRepoPath, candidate)
+			}
+		} else {
+			return fmt.Errorf("bare repo not found at %s", bareRepoPath)
+		}
 	}
 
 	// Ensure parent directory exists
@@ -266,7 +462,7 @@ func (m *Manager) repairRefineryWorktree(refineryRigDir string) error {
 
 	// Create worktree on the rig's default branch
 	defaultBranch := m.rig.DefaultBranch()
-	if err := bareGit.WorktreeAddExisting(refineryRigDir, defaultBranch); err != nil {
+	if err := bareGit.WorktreeAddExistingForce(refineryRigDir, defaultBranch); err != nil {
 		return fmt.Errorf("git worktree add: %w", err)
 	}
 
@@ -284,6 +480,16 @@ func (m *Manager) repairRefineryWorktree(refineryRigDir string) error {
 // Stop stops the refinery.
 // ZFC-compliant: tmux session is the source of truth.
 func (m *Manager) Stop() error {
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil && status.Alive {
+			_ = m.markRefineryStopping()
+			if err := managed.Close(context.Background()); err != nil {
+				return err
+			}
+			return m.deleteRefineryBinding()
+		}
+	}
 	t := tmux.NewTmux()
 	sessionID := m.SessionName()
 
@@ -294,7 +500,10 @@ func (m *Manager) Stop() error {
 	}
 
 	// Kill the tmux session
-	return t.KillSession(sessionID)
+	if err := t.KillSession(sessionID); err != nil {
+		return err
+	}
+	return m.deleteRefineryBinding()
 }
 
 // Queue returns the current merge queue.

@@ -1,13 +1,58 @@
 package deacon
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+type fakeRuntimeStarter struct {
+	requests  []runtime.SessionLaunchRequest
+	lookupReq *runtime.SessionLookupRequest
+	session   runtime.ManagedSession
+	err       error
+}
+
+func (f *fakeRuntimeStarter) Start(_ context.Context, req runtime.SessionLaunchRequest) (runtime.ManagedSession, error) {
+	f.requests = append(f.requests, req)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.session, nil
+}
+
+func (f *fakeRuntimeStarter) Lookup(_ context.Context, req runtime.SessionLookupRequest) (runtime.ManagedSession, error) {
+	f.lookupReq = &req
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.session, nil
+}
+
+type fakeManagedSession struct {
+	status runtime.SessionStatus
+	closed bool
+}
+
+func (f *fakeManagedSession) ID() string { return f.status.SessionID }
+func (f *fakeManagedSession) Status(context.Context) (runtime.SessionStatus, error) {
+	return f.status, nil
+}
+func (f *fakeManagedSession) Send(context.Context, string) error { return nil }
+func (f *fakeManagedSession) Close(context.Context) error {
+	f.closed = true
+	return nil
+}
 
 // mockTmux implements tmuxOps for testing.
 type mockTmux struct {
@@ -68,6 +113,16 @@ func newTestManager(townRoot string, mock *mockTmux) *Manager {
 	return &Manager{
 		townRoot: townRoot,
 		tmux:     mock,
+	}
+}
+
+func writeTownMarker(t *testing.T, townRoot string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"type":"town","version":2,"name":"slotmachine"}`), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -288,6 +343,177 @@ func TestStop_Success(t *testing.T) {
 	}
 	if len(mock.killCalls) != 1 {
 		t.Errorf("expected 1 kill call, got %d", len(mock.killCalls))
+	}
+}
+
+func TestStart_UsesAdapterForNonClaudeRoleConfig(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTownMarker(t, townRoot)
+	settings := config.NewTownSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{
+		"copilot-external": {
+			Provider: "copilot",
+			Command:  "copilot",
+			CLIURL:   "http://127.0.0.1:4321",
+		},
+	}
+	settings.RoleAgents = map[string]string{"deacon": "copilot-external"}
+	if err := config.SaveTownSettings(filepath.Join(townRoot, "settings", "config.json"), settings); err != nil {
+		t.Fatalf("SaveTownSettings() error = %v", err)
+	}
+	mock := &mockTmux{}
+	adapter := &fakeRuntimeStarter{}
+	m := &Manager{townRoot: townRoot, tmux: mock, adapter: adapter}
+
+	if err := m.Start(""); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if len(adapter.requests) != 1 {
+		t.Fatalf("adapter requests = %#v, want 1", adapter.requests)
+	}
+	if mock.newSessionCalls != 0 {
+		t.Fatalf("tmux new session calls = %d, want 0", mock.newSessionCalls)
+	}
+	request := adapter.requests[0]
+	if request.Role != "deacon" || request.SessionName != SessionName() {
+		t.Fatalf("request = %#v", request)
+	}
+	if request.IssueID != SessionName() {
+		t.Fatalf("IssueID = %q, want %q", request.IssueID, SessionName())
+	}
+	if request.WorkDir != filepath.Join(townRoot, "deacon") {
+		t.Fatalf("WorkDir = %q", request.WorkDir)
+	}
+	if !strings.Contains(request.Prompt, "I am Deacon") {
+		t.Fatalf("Prompt = %q", request.Prompt)
+	}
+}
+
+func TestLifecycleStateReportsStoppingFromBinding(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTownMarker(t, townRoot)
+	binding := runtime.SessionBinding{
+		IssueID:          SessionName(),
+		Role:             "deacon",
+		AgentName:        "deacon",
+		Provider:         "copilot-external",
+		SessionName:      SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleStopping,
+		WorkDir:          filepath.Join(townRoot, "deacon"),
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{townRoot: townRoot, tmux: &mockTmux{}}
+
+	state, err := m.LifecycleState()
+	if err != nil {
+		t.Fatalf("LifecycleState() error = %v", err)
+	}
+	if state != runtime.SessionLifecycleStopping {
+		t.Fatalf("LifecycleState() = %q, want stopping", state)
+	}
+	running, err := m.IsRunning()
+	if err != nil {
+		t.Fatalf("IsRunning() error = %v", err)
+	}
+	if running {
+		t.Fatal("IsRunning() = true, want false while stopping")
+	}
+}
+
+func TestLifecycleStateReportsStartingForFreshBindingWithoutLookup(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTownMarker(t, townRoot)
+	binding := runtime.SessionBinding{
+		IssueID:          SessionName(),
+		Role:             "deacon",
+		AgentName:        "deacon",
+		Provider:         "copilot-external",
+		SessionName:      SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleStarting,
+		UpdatedAt:        time.Now().UTC(),
+		WorkDir:          filepath.Join(townRoot, "deacon"),
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{townRoot: townRoot, tmux: &mockTmux{}, adapter: &fakeRuntimeStarter{err: fmt.Errorf("lookup unavailable")}}
+
+	state, err := m.LifecycleState()
+	if err != nil {
+		t.Fatalf("LifecycleState() error = %v", err)
+	}
+	if state != runtime.SessionLifecycleStarting {
+		t.Fatalf("LifecycleState() = %q, want starting", state)
+	}
+}
+
+func TestLifecycleStateReportsUnknownForStaleBindingWithoutLookup(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTownMarker(t, townRoot)
+	binding := runtime.SessionBinding{
+		IssueID:          SessionName(),
+		Role:             "deacon",
+		AgentName:        "deacon",
+		Provider:         "copilot-external",
+		SessionName:      SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleStarting,
+		UpdatedAt:        time.Now().UTC().Add(-2 * runtime.SessionLifecycleStartingGrace),
+		WorkDir:          filepath.Join(townRoot, "deacon"),
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{townRoot: townRoot, tmux: &mockTmux{}, adapter: &fakeRuntimeStarter{err: fmt.Errorf("lookup unavailable")}}
+
+	state, err := m.LifecycleState()
+	if err != nil {
+		t.Fatalf("LifecycleState() error = %v", err)
+	}
+	if state != runtime.SessionLifecycleUnknown {
+		t.Fatalf("LifecycleState() = %q, want unknown", state)
+	}
+}
+
+func TestStop_UsesManagedDeaconBinding(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTownMarker(t, townRoot)
+	managed := &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: true}}
+	binding := runtime.SessionBinding{
+		IssueID:          SessionName(),
+		Role:             "deacon",
+		AgentName:        "deacon",
+		Provider:         "copilot-external",
+		SessionName:      SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		WorkDir:          filepath.Join(townRoot, "deacon"),
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{townRoot: townRoot, tmux: &mockTmux{}, adapter: &fakeRuntimeStarter{session: managed}}
+
+	if err := m.Stop(); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if !managed.closed {
+		t.Fatal("managed session was not closed")
+	}
+	got, err := store.Load(context.Background(), binding.IssueID, binding.Role, binding.RigName, binding.AgentName)
+	if err != nil {
+		t.Fatalf("Load() after stop error = %v", err)
+	}
+	if got != nil {
+		data, _ := json.Marshal(got)
+		t.Fatalf("binding still exists after stop: %s", data)
 	}
 }
 

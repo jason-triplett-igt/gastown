@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/toolapi"
 )
 
 // SessionConfig describes how to create and start a tmux session.
@@ -74,6 +75,16 @@ type SessionConfig struct {
 	// AgentOverride optionally specifies a different agent alias (e.g., "opencode").
 	AgentOverride string
 
+	// SessionKind selects the shared tool-policy profile for external runtimes.
+	// Empty defaults to patrol behavior for the role.
+	SessionKind string
+
+	// ToolPolicy overrides the resolved tool policy for external runtimes.
+	ToolPolicy *config.ToolPolicy
+
+	// ToolCallbacks provides concrete tool-side effects for external runtimes.
+	ToolCallbacks toolapi.Callbacks
+
 	// RuntimeConfigDir overrides the config directory for the runtime.
 	RuntimeConfigDir string
 
@@ -118,6 +129,10 @@ type StartResult struct {
 	// Callers may need this for role-specific post-startup steps
 	// (e.g., handling fallback nudges, legacy fallback).
 	RuntimeConfig *config.RuntimeConfig
+
+	// ManagedSession is set when the role was started via the runtime adapter
+	// instead of a local tmux-backed process lifecycle.
+	ManagedSession runtime.ManagedSession
 
 	// RunID is the GASTA run identifier (GT_RUN) generated for this session.
 	// All telemetry events emitted within the session carry this ID, enabling
@@ -168,6 +183,42 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 	}
 	if err := runtime.EnsureSettingsForRole(settingsDir, cfg.WorkDir, cfg.Role, runtimeConfig); err != nil {
 		return nil, fmt.Errorf("ensuring runtime settings: %w", err)
+	}
+	if usesExternalServer(runtimeConfig) {
+		sessionKind := strings.TrimSpace(cfg.SessionKind)
+		if sessionKind == "" {
+			sessionKind = config.ToolSessionKindPatrol
+		}
+		toolPolicy := cfg.ToolPolicy
+		if toolPolicy == nil {
+			resolved := config.ResolveToolPolicyForSession(cfg.TownRoot, cfg.RigPath, cfg.Role, sessionKind, cfg.WorkDir)
+			toolPolicy = &resolved
+		}
+		adapter := runtime.NewTmuxSessionAdapter(t).WithBindingStore(runtime.NewFileSessionBindingStore(cfg.TownRoot))
+		managedSession, err := adapter.Start(ctx, runtime.SessionLaunchRequest{
+			Provider:             cfg.AgentOverride,
+			IssueID:              cfg.SessionID,
+			SessionName:          cfg.SessionID,
+			Role:                 cfg.Role,
+			SessionKind:          sessionKind,
+			TownRoot:             cfg.TownRoot,
+			RigName:              cfg.RigName,
+			RigPath:              cfg.RigPath,
+			AgentName:            cfg.roleAgentName(),
+			WorkDir:              cfg.WorkDir,
+			Prompt:               buildPrompt(cfg),
+			RuntimeConfigDir:     cfg.RuntimeConfigDir,
+			AcceptStartupDialogs: cfg.AcceptBypass,
+			Env:                  cloneEnv(cfg.ExtraEnv),
+			ToolPolicy:           toolPolicy,
+			ToolCallbacks:        cfg.ToolCallbacks,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("starting managed runtime session: %w", err)
+		}
+		RecordAgentInstantiateFromDir(ctx, runID, runtimeConfig.ResolvedAgent,
+			cfg.Role, cfg.AgentName, cfg.SessionID, cfg.RigName, cfg.TownRoot, "", cfg.WorkDir)
+		return &StartResult{RuntimeConfig: runtimeConfig, ManagedSession: managedSession, RunID: runID}, nil
 	}
 
 	// 3. Build startup command if not provided.
@@ -303,6 +354,28 @@ func StartSession(t *tmux.Tmux, cfg SessionConfig) (_ *StartResult, retErr error
 		cfg.Role, cfg.AgentName, cfg.SessionID, cfg.RigName, cfg.TownRoot, "", cfg.WorkDir)
 
 	return &StartResult{RuntimeConfig: runtimeConfig, RunID: runID}, nil
+}
+
+func (cfg SessionConfig) roleAgentName() string {
+	if strings.TrimSpace(cfg.AgentName) != "" {
+		return strings.ToLower(strings.TrimSpace(cfg.AgentName))
+	}
+	return strings.ToLower(strings.TrimSpace(cfg.Role))
+}
+
+func cloneEnv(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func usesExternalServer(runtimeConfig *config.RuntimeConfig) bool {
+	return runtimeConfig != nil && strings.TrimSpace(runtimeConfig.CLIURL) != ""
 }
 
 // RecordAgentInstantiateFromDir resolves the git branch/commit from workDir and

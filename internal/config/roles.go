@@ -38,6 +38,15 @@ type RoleDefinition struct {
 
 	// PromptTemplate is the name of the role's prompt template file.
 	PromptTemplate string `toml:"prompt_template,omitempty"`
+
+	// Profile classifies the role as builder, reviewer, or orchestrator.
+	Profile string `toml:"profile,omitempty"`
+
+	// HookPolicy controls hook/install behavior for the role.
+	HookPolicy string `toml:"hook_policy,omitempty"`
+
+	// AllowedTools restricts runtime boundary tools available to this role.
+	AllowedTools []string `toml:"allowed_tools,omitempty"`
 }
 
 // RoleSessionConfig contains session-related configuration.
@@ -270,6 +279,72 @@ func mergeRoleDefinition(base, override *RoleDefinition) {
 	if override.PromptTemplate != "" {
 		base.PromptTemplate = override.PromptTemplate
 	}
+	if override.Profile != "" {
+		base.Profile = override.Profile
+	}
+	if override.HookPolicy != "" {
+		base.HookPolicy = override.HookPolicy
+	}
+	if len(override.AllowedTools) > 0 {
+		base.AllowedTools = append([]string(nil), override.AllowedTools...)
+	}
+}
+
+func RoleProfile(townRoot, rigPath, roleName string) string {
+	def, err := LoadRoleDefinition(townRoot, rigPath, roleName)
+	if err != nil || def == nil || def.Profile == "" {
+		return defaultRoleProfile(roleName)
+	}
+	return def.Profile
+}
+
+func RoleHookPolicy(townRoot, rigPath, roleName string) string {
+	def, err := LoadRoleDefinition(townRoot, rigPath, roleName)
+	if err != nil || def == nil || def.HookPolicy == "" {
+		return defaultHookPolicy(roleName)
+	}
+	return def.HookPolicy
+}
+
+func RoleAllowedTools(townRoot, rigPath, roleName string) []string {
+	def, err := LoadRoleDefinition(townRoot, rigPath, roleName)
+	if err != nil || def == nil || len(def.AllowedTools) == 0 {
+		return defaultAllowedTools(roleName)
+	}
+	return append([]string(nil), def.AllowedTools...)
+}
+
+func defaultRoleProfile(roleName string) string {
+	switch roleName {
+	case "polecat", "crew":
+		return "builder"
+	case "witness", "refinery":
+		return "reviewer"
+	default:
+		return "orchestrator"
+	}
+}
+
+func defaultHookPolicy(roleName string) string {
+	switch defaultRoleProfile(roleName) {
+	case "builder":
+		return "builder"
+	case "reviewer":
+		return "reviewer"
+	default:
+		return "orchestrator"
+	}
+}
+
+func defaultAllowedTools(roleName string) []string {
+	switch defaultRoleProfile(roleName) {
+	case "builder":
+		return []string{"bd_show", "run_single_test", "run_unit_tests"}
+	case "reviewer":
+		return []string{"bd_show", "load_review", "run_verification"}
+	default:
+		return []string{"bd_show", "bd_ready", "bd_update", "bd_close", "bd_create", "nudge_agent", "send_mail"}
+	}
 }
 
 // ExpandPattern expands placeholders in a pattern string.
@@ -283,4 +358,3 @@ func ExpandPattern(pattern, townRoot, rig, name, role, prefix string) string {
 	result = strings.ReplaceAll(result, "{prefix}", prefix)
 	return result
 }
-

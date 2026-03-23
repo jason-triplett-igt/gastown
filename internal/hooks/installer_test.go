@@ -9,7 +9,7 @@ import (
 )
 
 func TestInstallForRole_RoleAware(t *testing.T) {
-	// Claude has autonomous/interactive variants
+	// Claude currently maps builder/reviewer to autonomous and orchestrator to interactive.
 	tests := []struct {
 		name     string
 		role     string
@@ -17,7 +17,7 @@ func TestInstallForRole_RoleAware(t *testing.T) {
 	}{
 		{"autonomous polecat", "polecat", "settings-autonomous.json"},
 		{"autonomous witness", "witness", "settings-autonomous.json"},
-		{"interactive crew", "crew", "settings-interactive.json"},
+		{"autonomous crew", "crew", "settings-autonomous.json"},
 		{"interactive mayor", "mayor", "settings-interactive.json"},
 	}
 
@@ -356,9 +356,9 @@ func TestInstallForRole_CursorRoleAware(t *testing.T) {
 	}
 
 	got, _ = os.ReadFile(filepath.Join(dir2, ".cursor", "hooks.json"))
-	want, _ = templateFS.ReadFile("templates/cursor/hooks-interactive.json")
+	want, _ = templateFS.ReadFile("templates/cursor/hooks-autonomous.json")
 	if string(got) != string(want) {
-		t.Error("cursor interactive: content mismatch")
+		t.Error("cursor builder compatibility mapping: content mismatch")
 	}
 }
 
@@ -388,12 +388,12 @@ func TestInstallForRole_CodexRoleAware(t *testing.T) {
 	}
 
 	got, _ := os.ReadFile(filepath.Join(dir, ".codex", "hooks.json"))
-	want, _ := templateFS.ReadFile("templates/codex/hooks-interactive.json")
+	want, _ := templateFS.ReadFile("templates/codex/hooks-autonomous.json")
 	if string(got) != string(want) {
-		t.Error("codex interactive: content mismatch")
+		t.Error("codex builder compatibility mapping: content mismatch")
 	}
 	if !strings.Contains(string(got), "gt costs record >/dev/null 2>&1 &") {
-		t.Error("codex interactive: stop hook should silence gt costs record output")
+		t.Error("codex builder compatibility mapping: stop hook should silence gt costs record output")
 	}
 
 	dir2 := t.TempDir()
@@ -433,9 +433,23 @@ func TestInstallForRole_CopilotRoleAware(t *testing.T) {
 	}
 
 	got, _ = os.ReadFile(filepath.Join(dir2, ".github/hooks", "gastown.json"))
-	want, _ = templateFS.ReadFile("templates/copilot/gastown-interactive.json")
+	want, _ = templateFS.ReadFile("templates/copilot/gastown-autonomous.json")
 	if string(got) != string(want) {
-		t.Error("copilot interactive: content mismatch")
+		t.Error("copilot builder compatibility mapping: content mismatch")
+	}
+}
+
+func TestInstallForRole_ReviewerUsesAutonomousCompatibilityTemplate(t *testing.T) {
+	dir := t.TempDir()
+	err := InstallForRole("claude", dir, dir, "witness", ".claude", "settings.json", true)
+	if err != nil {
+		t.Fatalf("InstallForRole(claude, witness): %v", err)
+	}
+
+	got, _ := os.ReadFile(filepath.Join(dir, ".claude", "settings.json"))
+	want, _ := templateFS.ReadFile("templates/claude/settings-autonomous.json")
+	if string(got) != string(want) {
+		t.Error("claude reviewer compatibility mapping: content mismatch")
 	}
 }
 
@@ -456,15 +470,15 @@ func TestComputeExpectedTemplate_Gemini(t *testing.T) {
 		t.Error("expected GT_HOOK_SOURCE=compact in autonomous template")
 	}
 
-	// Interactive role should get settings-interactive.json template
+	// Crew currently maps to the builder/autonomous compatibility template.
 	interactiveContent, err := ComputeExpectedTemplate("gemini", "settings.json", "crew")
 	if err != nil {
 		t.Fatalf("ComputeExpectedTemplate(crew): %v", err)
 	}
 
-	// Interactive template should NOT contain GT_HOOK_SOURCE=compact
-	if strings.Contains(string(interactiveContent), "GT_HOOK_SOURCE=compact") {
-		t.Error("interactive template should not contain GT_HOOK_SOURCE=compact")
+	// Builder/autonomous template should contain GT_HOOK_SOURCE=compact.
+	if !strings.Contains(string(interactiveContent), "GT_HOOK_SOURCE=compact") {
+		t.Error("crew template should contain GT_HOOK_SOURCE=compact")
 	}
 }
 

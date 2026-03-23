@@ -181,11 +181,26 @@ func writeTemplate(provider, role, hooksDir, hooksFile, targetPath string) error
 
 // resolveTemplate finds the right template for a provider+role combination.
 func resolveTemplate(provider, hooksFile, role string) ([]byte, error) {
-	// Determine role type
-	autonomous := hookutil.IsAutonomousRole(role)
+	policy := hookutil.HookPolicyFromWorkDir("", role)
+	if policy == "" {
+		if hookutil.IsAutonomousRole(role) {
+			policy = "autonomous"
+		} else {
+			policy = "interactive"
+		}
+	}
+	roleType := policy
+	if roleType == "builder" || roleType == "reviewer" || roleType == "orchestrator" {
+		// Backwards-compatible template naming until dedicated variants exist.
+		if roleType == "builder" || roleType == "reviewer" {
+			roleType = "autonomous"
+		} else {
+			roleType = "interactive"
+		}
+	}
 
 	// Try role-aware naming conventions
-	if autonomous {
+	if roleType == "autonomous" {
 		for _, pattern := range roleAwarePatterns("autonomous", hooksFile) {
 			path := fmt.Sprintf("templates/%s/%s", provider, pattern)
 			if content, err := templateFS.ReadFile(path); err == nil {
@@ -193,6 +208,12 @@ func resolveTemplate(provider, hooksFile, role string) ([]byte, error) {
 			}
 		}
 	} else {
+		for _, pattern := range roleAwarePatterns(roleType, hooksFile) {
+			path := fmt.Sprintf("templates/%s/%s", provider, pattern)
+			if content, err := templateFS.ReadFile(path); err == nil {
+				return content, nil
+			}
+		}
 		for _, pattern := range roleAwarePatterns("interactive", hooksFile) {
 			path := fmt.Sprintf("templates/%s/%s", provider, pattern)
 			if content, err := templateFS.ReadFile(path); err == nil {
