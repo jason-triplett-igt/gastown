@@ -9,13 +9,13 @@ import (
 	"time"
 )
 
-func TestExternalOwnerRequestRoundTrip(t *testing.T) {
+func TestExternalOwnerSendRequestRoundTrip(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	binding := &SessionBinding{SessionName: "hq-mayor", Metadata: OwnerBindingMetadata(ExternalOwnerDir(townRoot, "hq-mayor"), 1234)}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	request, err := enqueueExternalOwnerRequest(ctx, townRoot, binding, ExternalOwnerRequestKindAsk, "hello")
+	request, err := enqueueExternalOwnerRequest(ctx, townRoot, binding, ExternalOwnerRequestKindSend, "hello")
 	if err != nil {
 		t.Fatalf("enqueueExternalOwnerRequest() error = %v", err)
 	}
@@ -34,8 +34,8 @@ func TestExternalOwnerRequestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadExternalOwnerRequest() error = %v", err)
 	}
-	if parsed.ID != request.ID || parsed.Message != "hello" {
-		t.Fatalf("parsed request = %#v, want id=%q message=hello", parsed, request.ID)
+	if parsed.ID != request.ID || parsed.Message != "hello" || parsed.Kind != ExternalOwnerRequestKindSend {
+		t.Fatalf("parsed request = %#v, want id=%q kind=send message=hello", parsed, request.ID)
 	}
 	response := ExternalCopilotOwnerResponse{ID: request.ID, Content: "DONE", CreatedAt: time.Now().UTC()}
 	if err := WriteExternalOwnerResponse(townRoot, "hq-mayor", response); err != nil {
@@ -53,6 +53,112 @@ func TestExternalOwnerRequestRoundTrip(t *testing.T) {
 	}
 	if _, err := filepath.Abs(ExternalOwnerDir(townRoot, "hq-mayor")); err != nil {
 		t.Fatalf("ExternalOwnerDir() invalid path: %v", err)
+	}
+}
+
+func TestExternalOwnerAskRequestReturnsContent(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	binding := &SessionBinding{SessionName: "hq-mayor", Metadata: OwnerBindingMetadata(ExternalOwnerDir(townRoot, "hq-mayor"), 1234)}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	request, err := enqueueExternalOwnerRequest(ctx, townRoot, binding, ExternalOwnerRequestKindAsk, "what now?")
+	if err != nil {
+		t.Fatalf("enqueueExternalOwnerRequest() error = %v", err)
+	}
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		_ = WriteExternalOwnerResponse(townRoot, "hq-mayor", ExternalCopilotOwnerResponse{ID: request.ID, Content: "DONE", CreatedAt: time.Now().UTC()})
+	}()
+	resp, err := waitForExternalOwnerResponse(ctx, townRoot, binding, request.ID)
+	if err != nil {
+		t.Fatalf("waitForExternalOwnerResponse() error = %v", err)
+	}
+	if resp.Content != "DONE" {
+		t.Fatalf("Content = %q, want DONE", resp.Content)
+	}
+}
+
+func TestExternalOwnerRequestClaimIsAtomic(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	binding := &SessionBinding{SessionName: "hq-mayor", Metadata: OwnerBindingMetadata(ExternalOwnerDir(townRoot, "hq-mayor"), 1234)}
+	request, err := enqueueExternalOwnerRequest(context.Background(), townRoot, binding, ExternalOwnerRequestKindAsk, "hello")
+	if err != nil {
+		t.Fatalf("enqueueExternalOwnerRequest() error = %v", err)
+	}
+	paths, err := NextExternalOwnerRequests(townRoot, "hq-mayor")
+	if err != nil {
+		t.Fatalf("NextExternalOwnerRequests() error = %v", err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("NextExternalOwnerRequests() len = %d, want 1", len(paths))
+	}
+	claimed, err := ClaimExternalOwnerRequest(paths[0])
+	if err != nil {
+		t.Fatalf("ClaimExternalOwnerRequest() error = %v", err)
+	}
+	if _, err := ClaimExternalOwnerRequest(paths[0]); err == nil {
+		t.Fatal("second ClaimExternalOwnerRequest() error = nil, want failure")
+	}
+	if !strings.Contains(claimed, ".claimed-") {
+		t.Fatalf("claimed path = %q, want .claimed-<id> suffix", claimed)
+	}
+	parsed, err := ReadExternalOwnerRequest(claimed)
+	if err != nil {
+		t.Fatalf("ReadExternalOwnerRequest() error = %v", err)
+	}
+	if parsed.ID != request.ID {
+		t.Fatalf("parsed.ID = %q, want %q", parsed.ID, request.ID)
+	}
+}
+
+func TestExternalOwnerRejectsUnsupportedRequestKind(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	binding := &SessionBinding{SessionName: "hq-mayor", Metadata: OwnerBindingMetadata(ExternalOwnerDir(townRoot, "hq-mayor"), 1234)}
+	_, err := enqueueExternalOwnerRequest(context.Background(), townRoot, binding, "dance", "hello")
+	if err == nil {
+		t.Fatal("enqueueExternalOwnerRequest() error = nil, want unsupported kind error")
+	}
+	if !strings.Contains(err.Error(), "unsupported owner request kind") {
+		t.Fatalf("error = %v, want unsupported owner request kind", err)
+	}
+}
+
+func TestExternalOwnerProcessesRequestsFIFO(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	binding := &SessionBinding{SessionName: "hq-mayor", Metadata: OwnerBindingMetadata(ExternalOwnerDir(townRoot, "hq-mayor"), 1234)}
+	first, err := enqueueExternalOwnerRequest(context.Background(), townRoot, binding, ExternalOwnerRequestKindSend, "first")
+	if err != nil {
+		t.Fatalf("enqueue first error = %v", err)
+	}
+	time.Sleep(2 * time.Millisecond)
+	second, err := enqueueExternalOwnerRequest(context.Background(), townRoot, binding, ExternalOwnerRequestKindAsk, "second")
+	if err != nil {
+		t.Fatalf("enqueue second error = %v", err)
+	}
+	paths, err := NextExternalOwnerRequests(townRoot, "hq-mayor")
+	if err != nil {
+		t.Fatalf("NextExternalOwnerRequests() error = %v", err)
+	}
+	if len(paths) != 2 {
+		t.Fatalf("NextExternalOwnerRequests() len = %d, want 2", len(paths))
+	}
+	firstParsed, err := ReadExternalOwnerRequest(paths[0])
+	if err != nil {
+		t.Fatalf("ReadExternalOwnerRequest(first) error = %v", err)
+	}
+	secondParsed, err := ReadExternalOwnerRequest(paths[1])
+	if err != nil {
+		t.Fatalf("ReadExternalOwnerRequest(second) error = %v", err)
+	}
+	if firstParsed.ID != first.ID || secondParsed.ID != second.ID {
+		t.Fatalf("request order = %#v %#v, want first then second", firstParsed, secondParsed)
+	}
+	if firstParsed.Message != "first" || secondParsed.Message != "second" {
+		t.Fatalf("request messages = %#v %#v", firstParsed, secondParsed)
 	}
 }
 

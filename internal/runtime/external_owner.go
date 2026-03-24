@@ -363,6 +363,12 @@ func enqueueExternalOwnerRequest(ctx context.Context, townRoot string, binding *
 	if binding == nil {
 		return nil, fmt.Errorf("binding is required")
 	}
+	kind = strings.TrimSpace(kind)
+	switch kind {
+	case ExternalOwnerRequestKindSend, ExternalOwnerRequestKindAsk:
+	default:
+		return nil, fmt.Errorf("unsupported owner request kind %q", kind)
+	}
 	ownerDir := OwnerDirFromBinding(townRoot, binding)
 	if strings.TrimSpace(ownerDir) == "" {
 		return nil, fmt.Errorf("owner dir unavailable")
@@ -372,7 +378,7 @@ func enqueueExternalOwnerRequest(ctx context.Context, townRoot string, binding *
 	}
 	request := &ExternalCopilotOwnerRequest{
 		ID:        externalOwnerID("req"),
-		Kind:      strings.TrimSpace(kind),
+		Kind:      kind,
 		Message:   strings.TrimSpace(message),
 		CreatedAt: time.Now().UTC(),
 	}
