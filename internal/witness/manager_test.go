@@ -549,6 +549,105 @@ func TestStartUsesAdapterForNonClaudeRoleConfig(t *testing.T) {
 	}
 }
 
+func TestWitnessStartsExternalCopilotSession(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	witnessDir := filepath.Join(rigPath, "witness")
+	if err := os.MkdirAll(witnessDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := config.NewRigSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{
+		"copilot-external": {
+			Provider: "copilot",
+			Command:  "copilot",
+			CLIURL:   "http://127.0.0.1:4321",
+		},
+	}
+	settings.RoleAgents = map[string]string{"witness": "copilot-external"}
+	if err := config.SaveRigSettings(filepath.Join(rigPath, "settings", "config.json"), settings); err != nil {
+		t.Fatalf("SaveRigSettings() error = %v", err)
+	}
+	adapter := &fakeRuntimeStarter{}
+	m := &Manager{rig: &rig.Rig{Name: "gastown", Path: rigPath}, adapter: adapter}
+
+	if err := m.Start(false, "", nil); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if len(adapter.requests) != 1 {
+		t.Fatalf("adapter requests = %#v, want 1", adapter.requests)
+	}
+	request := adapter.requests[0]
+	if request.Role != "witness" || request.RigName != "gastown" {
+		t.Fatalf("request = %#v", request)
+	}
+	if request.SessionKind != config.ToolSessionKindPatrol {
+		t.Fatalf("SessionKind = %q, want %q", request.SessionKind, config.ToolSessionKindPatrol)
+	}
+	if request.WorkDir != witnessDir {
+		t.Fatalf("WorkDir = %q, want %q", request.WorkDir, witnessDir)
+	}
+	if request.AgentName != "witness" || request.IssueID != sessionNameForTest("gastown") {
+		t.Fatalf("request = %#v", request)
+	}
+	if request.ToolPolicy == nil || !contains(request.ToolPolicy.AvailableTools, "run_verification") {
+		t.Fatalf("ToolPolicy = %#v", request.ToolPolicy)
+	}
+	if !strings.Contains(request.Prompt, "Run `gt prime --hook` and begin patrol.") {
+		t.Fatalf("Prompt = %q, want witness patrol startup", request.Prompt)
+	}
+}
+
+func TestWitnessResumesStoredExternalBinding(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(`{"type":"town","version":2,"name":"slotmachine"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binding := runtime.SessionBinding{
+		IssueID:          "slotmachine-910",
+		Role:             "witness",
+		RigName:          "gastown",
+		AgentName:        "witness",
+		Provider:         "copilot-external",
+		SessionName:      sessionNameForTest("gastown"),
+		RuntimeSessionID: "runtime-xyz",
+		WorkDir:          filepath.Join(rigPath, "witness"),
+		Metadata:         map[string]string{"session_kind": "patrol"},
+	}
+	store := runtime.NewFileSessionBindingStore(root)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &fakeRuntimeStarter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: true}}}
+	m := &Manager{rig: &rig.Rig{Name: "gastown", Path: rigPath}, adapter: adapter}
+
+	running, err := m.IsRunning()
+	if err != nil {
+		t.Fatalf("IsRunning() error = %v", err)
+	}
+	if !running {
+		t.Fatal("IsRunning() = false, want true")
+	}
+	if adapter.lookupReq == nil {
+		t.Fatal("lookupReq = nil, want lookup from stored binding")
+	}
+	if adapter.lookupReq.SessionID != "runtime-xyz" {
+		t.Fatalf("SessionID = %q, want runtime-xyz", adapter.lookupReq.SessionID)
+	}
+	if adapter.lookupReq.Provider != "copilot-external" {
+		t.Fatalf("Provider = %q, want copilot-external", adapter.lookupReq.Provider)
+	}
+	if adapter.lookupReq.Metadata["session_kind"] != "patrol" {
+		t.Fatalf("Metadata = %#v, want session_kind=patrol", adapter.lookupReq.Metadata)
+	}
+}
+
 func sessionNameForTest(rigName string) string {
 	return session.WitnessSessionName(session.PrefixFor(rigName))
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,6 +168,95 @@ func TestManager_StartUsesAdapterForNonClaudeRoleConfig(t *testing.T) {
 	}
 	if request.Env["GT_REFINERY"] != "1" {
 		t.Fatalf("Env = %#v, want GT_REFINERY=1", request.Env)
+	}
+}
+
+func TestRefineryStartsExternalCopilotSession(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	refineryRigDir := filepath.Join(rigPath, "refinery", "rig")
+	if err := os.MkdirAll(refineryRigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := config.NewRigSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{
+		"copilot-external": {
+			Provider: "copilot",
+			Command:  "copilot",
+			CLIURL:   "http://127.0.0.1:4321",
+		},
+	}
+	settings.RoleAgents = map[string]string{"refinery": "copilot-external"}
+	if err := config.SaveRigSettings(filepath.Join(rigPath, "settings", "config.json"), settings); err != nil {
+		t.Fatalf("SaveRigSettings() error = %v", err)
+	}
+	adapter := &fakeRuntimeStarter{}
+	mgr.adapter = adapter
+
+	if err := mgr.Start(false, ""); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if len(adapter.requests) != 1 {
+		t.Fatalf("adapter requests = %#v, want 1", adapter.requests)
+	}
+	request := adapter.requests[0]
+	if request.Role != "refinery" || request.RigName != "testrig" {
+		t.Fatalf("request = %#v", request)
+	}
+	if request.SessionKind != config.ToolSessionKindPatrol {
+		t.Fatalf("SessionKind = %q, want %q", request.SessionKind, config.ToolSessionKindPatrol)
+	}
+	if request.WorkDir != refineryRigDir {
+		t.Fatalf("WorkDir = %q, want %q", request.WorkDir, refineryRigDir)
+	}
+	if request.Env["GT_REFINERY"] != "1" {
+		t.Fatalf("Env = %#v, want GT_REFINERY=1", request.Env)
+	}
+	if request.ToolPolicy == nil || len(request.ToolPolicy.AvailableTools) == 0 {
+		t.Fatalf("ToolPolicy = %#v, want resolved policy", request.ToolPolicy)
+	}
+	if !strings.Contains(request.Prompt, "Run `gt prime --hook` and begin patrol.") {
+		t.Fatalf("Prompt = %q, want refinery patrol startup", request.Prompt)
+	}
+}
+
+func TestRefineryResumesStoredExternalBinding(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	binding := runtime.SessionBinding{
+		IssueID:          mgr.SessionName(),
+		Role:             "refinery",
+		RigName:          "testrig",
+		AgentName:        "refinery",
+		Provider:         "copilot-external",
+		SessionName:      mgr.SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		WorkDir:          filepath.Join(rigPath, "refinery", "rig"),
+		Metadata:         map[string]string{"session_kind": "patrol"},
+	}
+	store := runtime.NewFileSessionBindingStore(filepath.Dir(rigPath))
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &fakeRuntimeStarter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: true}}}
+	mgr.adapter = adapter
+
+	running, err := mgr.IsRunning()
+	if err != nil {
+		t.Fatalf("IsRunning() error = %v", err)
+	}
+	if !running {
+		t.Fatal("IsRunning() = false, want true")
+	}
+	if adapter.lookupReq == nil {
+		t.Fatal("lookupReq = nil, want lookup from stored binding")
+	}
+	if adapter.lookupReq.SessionID != "runtime-xyz" {
+		t.Fatalf("SessionID = %q, want runtime-xyz", adapter.lookupReq.SessionID)
+	}
+	if adapter.lookupReq.Provider != "copilot-external" {
+		t.Fatalf("Provider = %q, want copilot-external", adapter.lookupReq.Provider)
+	}
+	if adapter.lookupReq.Metadata["session_kind"] != "patrol" {
+		t.Fatalf("Metadata = %#v, want session_kind=patrol", adapter.lookupReq.Metadata)
 	}
 }
 
