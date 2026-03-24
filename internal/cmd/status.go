@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/mayor"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -120,15 +122,18 @@ type DNDInfo struct {
 
 // AgentRuntime represents the runtime state of an agent.
 type AgentRuntime struct {
-	Name         string `json:"name"`                    // Display name (e.g., "mayor", "witness")
-	Address      string `json:"address"`                 // Full address (e.g., "greenplace/witness")
-	Session      string `json:"session"`                 // tmux session name
-	Role         string `json:"role"`                    // Role type
-	Running      bool   `json:"running"`                 // Is tmux session running?
-	ACP          bool   `json:"acp"`                     // Is ACP session active?
-	HasWork      bool   `json:"has_work"`                // Has pinned work?
-	WorkTitle    string `json:"work_title,omitempty"`    // Title of pinned work
-	HookBead     string `json:"hook_bead,omitempty"`     // Pinned bead ID from agent bead
+	Name              string `json:"name"`                         // Display name (e.g., "mayor", "witness")
+	Address           string `json:"address"`                      // Full address (e.g., "greenplace/witness")
+	Session           string `json:"session"`                      // tmux session name
+	Role              string `json:"role"`                         // Role type
+	Running           bool   `json:"running"`                      // Is tmux session running?
+	Ready             bool   `json:"ready"`                        // Is runtime ready to accept work?
+	Busy              bool   `json:"busy"`                         // Is runtime actively processing work?
+	StatusError       string `json:"status_error,omitempty"`       // Last runtime status error
+	ACP               bool   `json:"acp"`                          // Is ACP session active?
+	HasWork           bool   `json:"has_work"`                     // Has pinned work?
+	WorkTitle         string `json:"work_title,omitempty"`         // Title of pinned work
+	HookBead          string `json:"hook_bead,omitempty"`          // Pinned bead ID from agent bead
 	State             string `json:"state,omitempty"`              // Agent state from agent bead
 	NotificationLevel string `json:"notification_level,omitempty"` // Notification level (verbose, normal, muted)
 	UnreadMail        int    `json:"unread_mail"`                  // Number of unread messages
@@ -1189,7 +1194,11 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 	var stateInfo string
 
 	if sessionExists {
-		statusStr = style.Success.Render("running")
+		if agent.Ready {
+			statusStr = style.Success.Render("running")
+		} else {
+			statusStr = style.Warning.Render("degraded")
+		}
 	} else {
 		statusStr = style.Error.Render("stopped")
 	}
@@ -1241,6 +1250,13 @@ func renderAgentDetails(w io.Writer, agent AgentRuntime, indent string, hooks []
 	// Line 2: Agent runtime info
 	if agent.AgentInfo != "" {
 		fmt.Printf("%s  agent: %s\n", indent, agent.AgentInfo)
+	}
+	if sessionExists && (!agent.Ready || agent.Busy || strings.TrimSpace(agent.StatusError) != "") {
+		extra := []string{fmt.Sprintf("ready=%t", agent.Ready), fmt.Sprintf("busy=%t", agent.Busy)}
+		if strings.TrimSpace(agent.StatusError) != "" {
+			extra = append(extra, fmt.Sprintf("error=%s", agent.StatusError))
+		}
+		fmt.Fprintf(w, "%s  runtime: %s\n", indent, strings.Join(extra, " "))
 	}
 
 	// Line 3: Hook bead (pinned work)
@@ -1439,9 +1455,16 @@ func buildStatusIndicator(agent AgentRuntime) string {
 	// Base indicator from tmux state or ACP state
 	var indicator string
 	if sessionExists {
-		indicator = style.Success.Render("●")
+		if agent.Ready {
+			indicator = style.Success.Render("●")
+		} else {
+			indicator = style.Warning.Render("◐")
+		}
 	} else {
 		indicator = style.Error.Render("○")
+	}
+	if sessionExists && agent.Busy {
+		indicator += style.Dim.Render(" busy")
 	}
 
 	// Add mode info if ACP
@@ -1466,6 +1489,60 @@ func buildStatusIndicator(agent AgentRuntime) string {
 	}
 
 	return indicator
+}
+
+func applyManagedAgentStatus(agent *AgentRuntime, status runtime.SessionStatus) {
+	if agent == nil {
+		return
+	}
+	agent.Running = status.Alive
+	agent.Ready = status.Ready
+	agent.Busy = status.Busy
+}
+
+func managedAgentStatus(townRoot, rigName, role, sessionName, agentName string) (runtime.SessionStatus, bool) {
+	if strings.TrimSpace(townRoot) == "" || strings.TrimSpace(role) == "" {
+		return runtime.SessionStatus{}, false
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	binding, err := store.Load(context.Background(), "", role, rigName, agentName)
+	if err != nil || binding == nil || strings.TrimSpace(binding.RuntimeSessionID) == "" {
+		return runtime.SessionStatus{}, false
+	}
+	if strings.TrimSpace(sessionName) != "" && strings.TrimSpace(binding.SessionName) != strings.TrimSpace(sessionName) {
+		return runtime.SessionStatus{}, false
+	}
+	rigPath := ""
+	if strings.TrimSpace(binding.RigName) != "" {
+		rigPath = filepath.Join(townRoot, binding.RigName)
+	}
+	adapter := runtime.NewTmuxSessionAdapter(tmux.NewTmux()).WithBindingStore(store)
+	managed, err := adapter.Lookup(context.Background(), runtime.SessionLookupRequest{
+		SessionID:   binding.RuntimeSessionID,
+		Provider:    binding.Provider,
+		IssueID:     binding.IssueID,
+		SessionName: binding.SessionName,
+		Role:        binding.Role,
+		TownRoot:    townRoot,
+		RigName:     binding.RigName,
+		RigPath:     rigPath,
+		AgentName:   binding.AgentName,
+		WorkDir:     binding.WorkDir,
+		Metadata:    binding.Metadata,
+	})
+	if err != nil || managed == nil {
+		return runtime.SessionStatus{}, false
+	}
+	status, statusErr := managed.Status(context.Background())
+	if statusErr != nil {
+		status.Ready = false
+		status.Busy = false
+		status.Alive = status.Alive || strings.TrimSpace(binding.RuntimeSessionID) != ""
+		if strings.TrimSpace(status.SessionID) == "" {
+			status.SessionID = binding.RuntimeSessionID
+		}
+	}
+	return status, true
 }
 
 // formatHookInfo formats the hook bead and title for display
@@ -1580,13 +1657,19 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 
 			// Check tmux session from preloaded map (O(1))
 			agent.Running = allSessions[d.session]
+			agent.Ready = agent.Running
 
 			// Check for ACP session (for Mayor)
 			if d.name == "mayor" {
 				if mayor.IsACPActive(townRoot) {
 					agent.ACP = true
 					agent.Running = true
+					agent.Ready = true
 				}
+			}
+
+			if status, ok := managedAgentStatus(townRoot, "", d.role, d.session, d.name); ok {
+				applyManagedAgentStatus(&agent, status)
 			}
 
 			// Look up agent bead from preloaded map (O(1))
@@ -1766,6 +1849,11 @@ func discoverRigAgents(allSessions map[string]bool, r *rig.Rig, crews []string, 
 
 			// Check tmux session from preloaded map (O(1))
 			agent.Running = allSessions[d.session]
+			agent.Ready = agent.Running
+
+			if status, ok := managedAgentStatus(townRoot, r.Name, d.role, d.session, d.name); ok {
+				applyManagedAgentStatus(&agent, status)
+			}
 
 			// Look up agent bead from preloaded map (O(1))
 			if issue, ok := allAgentBeads[d.beadID]; ok {

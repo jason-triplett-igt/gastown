@@ -168,10 +168,26 @@ func TestBuildStatusIndicator_ZombieShowsStopped(t *testing.T) {
 
 func TestBuildStatusIndicator_AliveShowsRunning(t *testing.T) {
 	// Verify that an alive agent (Running=true) shows ● (running)
-	agent := AgentRuntime{Running: true}
+	agent := AgentRuntime{Running: true, Ready: true}
 	indicator := buildStatusIndicator(agent)
 	if strings.Contains(indicator, "○") {
 		t.Fatal("alive agent (Running=true) should not show ○ indicator")
+	}
+}
+
+func TestBuildStatusIndicator_DegradedShowsHalfState(t *testing.T) {
+	agent := AgentRuntime{Running: true, Ready: false}
+	indicator := buildStatusIndicator(agent)
+	if !strings.Contains(indicator, "◐") {
+		t.Fatalf("degraded agent indicator = %q, want ◐", indicator)
+	}
+}
+
+func TestBuildStatusIndicator_BusyAppendsBusySuffix(t *testing.T) {
+	agent := AgentRuntime{Running: true, Ready: true, Busy: true}
+	indicator := buildStatusIndicator(agent)
+	if !strings.Contains(indicator, "busy") {
+		t.Fatalf("busy agent indicator = %q, want busy suffix", indicator)
 	}
 }
 
@@ -204,6 +220,27 @@ func TestOutputStatusText_IncludesDNDSection(t *testing.T) {
 	}
 	if !strings.Contains(out, "on") {
 		t.Fatalf("expected DND state 'on' in status output, got: %q", out)
+	}
+}
+
+func TestRenderAgentDetails_IncludesRuntimeHealthLineForDegradedAgent(t *testing.T) {
+	agent := AgentRuntime{
+		Name:        "witness",
+		Address:     "gastown/witness",
+		Role:        "witness",
+		Running:     true,
+		Ready:       false,
+		Busy:        true,
+		StatusError: "owner degraded",
+	}
+
+	var buf bytes.Buffer
+	renderAgentDetails(&buf, agent, "   ", nil, t.TempDir())
+	output := buf.String()
+	for _, want := range []string{"degraded", "runtime: ready=false busy=true error=owner degraded"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("output %q does not contain %q", output, want)
+		}
 	}
 }
 
