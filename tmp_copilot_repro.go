@@ -28,11 +28,30 @@ type eventRecord struct {
 	Model   string `json:"model,omitempty"`
 	Tool    string `json:"tool,omitempty"`
 	Error   string `json:"error,omitempty"`
+	Success *bool  `json:"success,omitempty"`
 }
 
 type toolCallRecord struct {
 	Name      string         `json:"name"`
 	Arguments map[string]any `json:"arguments,omitempty"`
+}
+
+type toolResultContentRecord struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Cwd      string `json:"cwd,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty"`
+}
+
+type toolExecutionRecord struct {
+	ToolCallID      string                    `json:"tool_call_id,omitempty"`
+	ToolName        string                    `json:"tool_name,omitempty"`
+	Success         *bool                     `json:"success,omitempty"`
+	Error           string                    `json:"error,omitempty"`
+	ResultContent   string                    `json:"result_content,omitempty"`
+	DetailedContent string                    `json:"detailed_content,omitempty"`
+	ResultKind      string                    `json:"result_kind,omitempty"`
+	Contents        []toolResultContentRecord `json:"contents,omitempty"`
 }
 
 type mailRecord struct {
@@ -52,26 +71,27 @@ type nudgeRecord struct {
 }
 
 type runOutput struct {
-	WorkDir          string           `json:"workdir"`
-	Prompt           string           `json:"prompt"`
-	RequestedModel   string           `json:"requested_model,omitempty"`
-	ReasoningEffort  string           `json:"reasoning_effort,omitempty"`
-	ResolvedModel    string           `json:"resolved_model,omitempty"`
-	SessionID        string           `json:"session_id,omitempty"`
-	FinalContent     string           `json:"final_content,omitempty"`
-	EventTypes       []string         `json:"event_types,omitempty"`
-	Events           []eventRecord    `json:"events,omitempty"`
-	ToolCalls        []toolCallRecord `json:"tool_calls,omitempty"`
-	SimpleToolHits   int              `json:"simple_tool_hits"`
-	SimpleToolArgs   []string         `json:"simple_tool_args,omitempty"`
-	ToolUseObserved  bool             `json:"tool_use_observed"`
-	ModelQueryError  string           `json:"model_query_error,omitempty"`
-	SessionRunError  string           `json:"session_run_error,omitempty"`
-	CreateError      string           `json:"create_error,omitempty"`
-	ListModelsSample []string         `json:"list_models_sample,omitempty"`
-	ArtifactDir      string           `json:"artifact_dir,omitempty"`
-	MailCalls        []mailRecord     `json:"mail_calls,omitempty"`
-	NudgeCalls       []nudgeRecord    `json:"nudge_calls,omitempty"`
+	WorkDir          string                `json:"workdir"`
+	Prompt           string                `json:"prompt"`
+	RequestedModel   string                `json:"requested_model,omitempty"`
+	ReasoningEffort  string                `json:"reasoning_effort,omitempty"`
+	ResolvedModel    string                `json:"resolved_model,omitempty"`
+	SessionID        string                `json:"session_id,omitempty"`
+	FinalContent     string                `json:"final_content,omitempty"`
+	EventTypes       []string              `json:"event_types,omitempty"`
+	Events           []eventRecord         `json:"events,omitempty"`
+	ToolCalls        []toolCallRecord      `json:"tool_calls,omitempty"`
+	ToolExecutions   []toolExecutionRecord `json:"tool_executions,omitempty"`
+	SimpleToolHits   int                   `json:"simple_tool_hits"`
+	SimpleToolArgs   []string              `json:"simple_tool_args,omitempty"`
+	ToolUseObserved  bool                  `json:"tool_use_observed"`
+	ModelQueryError  string                `json:"model_query_error,omitempty"`
+	SessionRunError  string                `json:"session_run_error,omitempty"`
+	CreateError      string                `json:"create_error,omitempty"`
+	ListModelsSample []string              `json:"list_models_sample,omitempty"`
+	ArtifactDir      string                `json:"artifact_dir,omitempty"`
+	MailCalls        []mailRecord          `json:"mail_calls,omitempty"`
+	NudgeCalls       []nudgeRecord         `json:"nudge_calls,omitempty"`
 }
 
 func main() {
@@ -85,6 +105,8 @@ func main() {
 		disableResume       = flag.Bool("disable-resume", false, "Use DisableResume when resuming a session")
 		systemMessage       = flag.String("system-message", "", "Optional system message content to append to the session")
 		timeout             = flag.Duration("timeout", 45*time.Second, "Overall timeout")
+		streaming           = flag.Bool("streaming", true, "Enable streaming session events")
+		approveAllPerms     = flag.Bool("approve-all-permissions", false, "Approve all permission requests for built-in tools")
 		withSimpleTool      = flag.Bool("with-simple-tool", false, "Register a minimal local tool named simple_echo")
 		withDelegationTools = flag.Bool("with-delegation-tools", false, "Register Gastown send_mail and nudge_agent tools with local artifact callbacks")
 		listModels          = flag.Bool("list-models", false, "List models before creating the session")
@@ -132,6 +154,7 @@ func main() {
 		events         []eventRecord
 		eventTypesSeen = map[string]struct{}{}
 		toolCalls      []toolCallRecord
+		toolExecutions []toolExecutionRecord
 		mailCalls      []mailRecord
 		nudgeCalls     []nudgeRecord
 		simpleToolHits int
@@ -223,9 +246,10 @@ func main() {
 			WorkingDirectory:    *workDir,
 			Tools:               tools,
 			AvailableTools:      append([]string(nil), availableTools...),
-			OnPermissionRequest: denyAllPermissions,
+			OnPermissionRequest: permissionHandler(*approveAllPerms),
 			DisableResume:       *disableResume,
 			SystemMessage:       systemMessageConfig,
+			Streaming:           *streaming,
 		})
 	} else {
 		sess, err = client.CreateSession(ctx, &copilot.SessionConfig{
@@ -234,8 +258,9 @@ func main() {
 			WorkingDirectory:    *workDir,
 			Tools:               tools,
 			AvailableTools:      append([]string(nil), availableTools...),
-			OnPermissionRequest: denyAllPermissions,
+			OnPermissionRequest: permissionHandler(*approveAllPerms),
 			SystemMessage:       systemMessageConfig,
+			Streaming:           *streaming,
 		})
 	}
 	if err != nil {
@@ -271,12 +296,58 @@ func main() {
 		if event.Data.Error != nil && event.Data.Error.ErrorClass != nil {
 			rec.Error = strings.TrimSpace(event.Data.Error.ErrorClass.Message)
 		}
+		if event.Data.Success != nil {
+			success := *event.Data.Success
+			rec.Success = &success
+		}
 		eventsMu.Lock()
 		defer eventsMu.Unlock()
 		events = append(events, rec)
 		eventTypesSeen[rec.Type] = struct{}{}
 		if rec.Tool != "" {
 			toolCalls = append(toolCalls, toolCallRecord{Name: rec.Tool})
+		}
+		if event.Type == copilot.SessionEventTypeToolExecutionComplete {
+			execRec := toolExecutionRecord{}
+			if event.Data.ToolCallID != nil {
+				execRec.ToolCallID = strings.TrimSpace(*event.Data.ToolCallID)
+			}
+			if event.Data.ToolName != nil {
+				execRec.ToolName = strings.TrimSpace(*event.Data.ToolName)
+			}
+			if event.Data.Success != nil {
+				success := *event.Data.Success
+				execRec.Success = &success
+			}
+			if event.Data.Error != nil && event.Data.Error.ErrorClass != nil {
+				execRec.Error = strings.TrimSpace(event.Data.Error.ErrorClass.Message)
+			}
+			if event.Data.Result != nil {
+				if event.Data.Result.Content != nil {
+					execRec.ResultContent = strings.TrimSpace(*event.Data.Result.Content)
+				}
+				if event.Data.Result.DetailedContent != nil {
+					execRec.DetailedContent = strings.TrimSpace(*event.Data.Result.DetailedContent)
+				}
+				if event.Data.Result.Kind != nil {
+					execRec.ResultKind = string(*event.Data.Result.Kind)
+				}
+				for _, content := range event.Data.Result.Contents {
+					contentRec := toolResultContentRecord{Type: string(content.Type)}
+					if content.Text != nil {
+						contentRec.Text = strings.TrimSpace(*content.Text)
+					}
+					if content.Cwd != nil {
+						contentRec.Cwd = strings.TrimSpace(*content.Cwd)
+					}
+					if content.ExitCode != nil {
+						exitCode := int(*content.ExitCode)
+						contentRec.ExitCode = &exitCode
+					}
+					execRec.Contents = append(execRec.Contents, contentRec)
+				}
+			}
+			toolExecutions = append(toolExecutions, execRec)
 		}
 	})
 	defer unsubscribe()
@@ -294,6 +365,7 @@ func main() {
 	eventsMu.Lock()
 	out.Events = append([]eventRecord(nil), events...)
 	out.ToolCalls = append([]toolCallRecord(nil), toolCalls...)
+	out.ToolExecutions = append([]toolExecutionRecord(nil), toolExecutions...)
 	out.MailCalls = append([]mailRecord(nil), mailCalls...)
 	out.NudgeCalls = append([]nudgeRecord(nil), nudgeCalls...)
 	out.SimpleToolHits = simpleToolHits
@@ -319,6 +391,19 @@ func denyAllPermissions(req copilot.PermissionRequest, inv copilot.PermissionInv
 		return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindApproved}, nil
 	}
 	return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindDeniedByRules}, nil
+}
+
+func approveAllPermissions(req copilot.PermissionRequest, inv copilot.PermissionInvocation) (copilot.PermissionRequestResult, error) {
+	_ = req
+	_ = inv
+	return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindApproved}, nil
+}
+
+func permissionHandler(approveAll bool) copilot.PermissionHandlerFunc {
+	if approveAll {
+		return approveAllPermissions
+	}
+	return denyAllPermissions
 }
 
 func emit(out runOutput) {

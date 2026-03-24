@@ -185,6 +185,30 @@ So the current production recommendation stays the same:
 - use explicit postcondition checks in agent instructions and operator workflows
 - do not build production `postToolUse` verification around `textResultForLlm`
 
+## SDK Streaming Event Cross-Check
+
+We also cross-checked the raw SDK event stream with `tmp_copilot_repro.go` using
+an approved built-in bash tool prompt that ran:
+
+- `pwd`
+- `sh -lc 'echo sdk-event-fail >&2; exit 17'`
+
+Observed `tool.execution_complete` behavior from the SDK session:
+
+- the successful command produced `success: true`
+- the failing command also produced `success: true`
+- the only failure signal remained embedded in `result_content` /
+  `detailed_content` as `<exited with exit code 17>`
+
+So the lossy success semantics are not limited to hook payloads. They also show
+up in the SDK event stream currently available to Gastown.
+
+Practical consequence:
+
+- SDK events are still useful for telemetry and debugging
+- they are still not reliable enough to serve as an authoritative shell success
+  signal for production postcondition enforcement
+
 ## Next Step
 
 After collecting real probe samples, add one of:
