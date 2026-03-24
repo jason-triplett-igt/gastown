@@ -11,6 +11,8 @@ const (
 	TypeRuntimeSessionResume = "runtime_session_resume"
 	TypeRuntimeSessionClose  = "runtime_session_close"
 	TypeRuntimeSessionStatus = "runtime_session_status"
+	TypeRuntimeSessionBusy   = "runtime_session_busy"
+	TypeRuntimeSessionIdle   = "runtime_session_idle"
 )
 
 type LifecycleRecorder interface {

@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/copilotbridge"
 	"github.com/steveyegge/gastown/internal/copilotutil"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/toolapi"
 	"github.com/steveyegge/gastown/internal/toolcallbacks"
@@ -23,6 +24,8 @@ import (
 var (
 	externalOwnerConfigPath string
 )
+
+var recordOwnerLifecycleEvent = events.LogFeed
 
 var externalCopilotOwnerCmd = &cobra.Command{
 	Use:    "external-copilot-owner",
@@ -115,6 +118,7 @@ func runExternalCopilotOwner(cmd *cobra.Command, args []string) error {
 	if pid := os.Getpid(); pid > 0 {
 		ownerPID = pid
 	}
+	busyState := false
 	if err := runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, UpdatedAt: time.Now().UTC()}); err != nil {
 		return err
 	}
@@ -128,10 +132,12 @@ func runExternalCopilotOwner(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				continue
 			}
+			recordOwnerBusyTransition(cfg, session.SessionID, true, &busyState)
 			_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: true, UpdatedAt: time.Now().UTC()})
 			request, err := runtime.ReadExternalOwnerRequest(claimedPath)
 			if err != nil {
 				_ = runtime.RemoveExternalOwnerRequest(claimedPath)
+				recordOwnerBusyTransition(cfg, session.SessionID, false, &busyState)
 				_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: false, UpdatedAt: time.Now().UTC()})
 				continue
 			}
@@ -183,11 +189,28 @@ func runExternalCopilotOwner(cmd *cobra.Command, args []string) error {
 				_ = runtime.WriteExternalOwnerResponse(cfg.TownRoot, cfg.SessionName, response)
 			}
 			_ = runtime.RemoveExternalOwnerRequest(claimedPath)
+			recordOwnerBusyTransition(cfg, session.SessionID, false, &busyState)
 			_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: false, UpdatedAt: time.Now().UTC(), Error: response.Error})
 		}
+		recordOwnerBusyTransition(cfg, session.SessionID, false, &busyState)
 		_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: false, UpdatedAt: time.Now().UTC()})
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+func recordOwnerBusyTransition(cfg *runtime.ExternalCopilotOwnerConfig, runtimeSessionID string, busy bool, current *bool) {
+	if cfg == nil || current == nil || *current == busy {
+		return
+	}
+	*current = busy
+	eventType := runtime.TypeRuntimeSessionIdle
+	if busy {
+		eventType = runtime.TypeRuntimeSessionBusy
+	}
+	_ = recordOwnerLifecycleEvent(eventType, cfg.Role, runtime.RuntimeSessionPayload(cfg.SessionName, runtimeSessionID, cfg.Role, cfg.IssueID, cfg.Provider, map[string]interface{}{
+		"work_dir": cfg.WorkDir,
+		"busy":     busy,
+	}))
 }
 
 func ownerSendAndWaitForReply(ctx context.Context, sess *copilot.Session, state *ownerRequestState) (*copilot.SessionEvent, error) {
