@@ -296,6 +296,21 @@ func TestLaunchReviewSessionStartsIndependentWitnessSession(t *testing.T) {
 	if !strings.Contains(request.Prompt, "fresh context") || !strings.Contains(request.Prompt, "approved artifacts") {
 		t.Fatalf("Prompt = %q", request.Prompt)
 	}
+	for _, want := range []string{
+		"[GAS TOWN]",
+		"witness review (rig: gastown)",
+		"<- mayor",
+		"review:" + created.ID,
+	} {
+		if !strings.Contains(request.Prompt, want) {
+			t.Fatalf("Prompt = %q, want substring %q", request.Prompt, want)
+		}
+	}
+	for _, notWant := range []string{"gastown/witness/review", "Run `gt prime` to initialize your context."} {
+		if strings.Contains(request.Prompt, notWant) {
+			t.Fatalf("Prompt = %q, should not contain %q", request.Prompt, notWant)
+		}
+	}
 }
 
 func TestIsRunningUsesManagedWitnessBinding(t *testing.T) {
