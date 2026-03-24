@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -207,5 +208,127 @@ func TestWaitForExternalOwnerResponseIgnoresIncompleteResponseFile(t *testing.T)
 	}
 	if response.Content != "DONE" {
 		t.Fatalf("response.Content = %q, want DONE", response.Content)
+	}
+}
+
+func TestWaitForExternalOwnerReadyReturnsStatusWhenRuntimeSessionIDAppears(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	sessionName := "hq-mayor"
+	pid := os.Getpid()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		_ = WriteExternalOwnerStatus(townRoot, sessionName, ExternalCopilotOwnerStatus{
+			OwnerPID:         pid,
+			RuntimeSessionID: "runtime-123",
+			UpdatedAt:        time.Now().UTC(),
+		})
+	}()
+
+	status, err := waitForExternalOwnerReady(ctx, townRoot, sessionName, pid)
+	if err != nil {
+		t.Fatalf("waitForExternalOwnerReady() error = %v", err)
+	}
+	if status.RuntimeSessionID != "runtime-123" {
+		t.Fatalf("RuntimeSessionID = %q, want runtime-123", status.RuntimeSessionID)
+	}
+	if status.OwnerPID != pid {
+		t.Fatalf("OwnerPID = %d, want %d", status.OwnerPID, pid)
+	}
+}
+
+func TestWaitForExternalOwnerReadyReturnsContextErrorWhenStatusNeverArrives(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
+	defer cancel()
+
+	_, err := waitForExternalOwnerReady(ctx, t.TempDir(), "hq-mayor", os.Getpid())
+	if err == nil {
+		t.Fatal("waitForExternalOwnerReady() error = nil, want context deadline exceeded")
+	}
+	if !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("waitForExternalOwnerReady() error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestWaitForExternalOwnerReadyFailsWhenProcessExitsBeforeReady(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := waitForExternalOwnerReady(ctx, t.TempDir(), "hq-mayor", 999999)
+	if err == nil {
+		t.Fatal("waitForExternalOwnerReady() error = nil, want early exit error")
+	}
+	if !strings.Contains(err.Error(), "external owner process exited before becoming ready") {
+		t.Fatalf("waitForExternalOwnerReady() error = %v, want early exit message", err)
+	}
+}
+
+func TestReadExternalOwnerConfigRoundTrip(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	cfg := ExternalCopilotOwnerConfig{
+		IssueID:         "slotmachine-910.3.7",
+		Role:            "witness",
+		RigName:         "gastown",
+		AgentName:       "watch",
+		SessionName:     "gt-witness-review",
+		TownRoot:        townRoot,
+		WorkDir:         filepath.Join(townRoot, "gastown"),
+		RequestedModel:  "claude-sonnet-4.6",
+		ReasoningEffort: "high",
+		ResumeSessionID: "runtime-456",
+		Metadata: map[string]string{
+			"session_kind": "review",
+		},
+	}
+	if err := WriteExternalOwnerConfig(cfg); err != nil {
+		t.Fatalf("WriteExternalOwnerConfig() error = %v", err)
+	}
+	got, err := ReadExternalOwnerConfig(ExternalOwnerConfigPath(townRoot, cfg.SessionName))
+	if err != nil {
+		t.Fatalf("ReadExternalOwnerConfig() error = %v", err)
+	}
+	if got.ResumeSessionID != "runtime-456" {
+		t.Fatalf("ResumeSessionID = %q, want runtime-456", got.ResumeSessionID)
+	}
+	if got.RequestedModel != "claude-sonnet-4.6" {
+		t.Fatalf("RequestedModel = %q, want claude-sonnet-4.6", got.RequestedModel)
+	}
+	if got.Metadata["session_kind"] != "review" {
+		t.Fatalf("Metadata = %#v, want session_kind=review", got.Metadata)
+	}
+	if got.TownRoot != townRoot {
+		t.Fatalf("TownRoot = %q, want %q", got.TownRoot, townRoot)
+	}
+	if got.WorkDir != filepath.Join(townRoot, "gastown") {
+		t.Fatalf("WorkDir = %q", got.WorkDir)
+	}
+	if _, err := os.Stat(ExternalOwnerConfigPath(townRoot, cfg.SessionName)); err != nil {
+		t.Fatalf("owner config file missing: %v", err)
+	}
+	if _, err := filepath.Abs(ExternalOwnerConfigPath(townRoot, cfg.SessionName)); err != nil {
+		t.Fatalf("ExternalOwnerConfigPath() invalid: %v", err)
+	}
+	if got.Role != "witness" || got.AgentName != "watch" {
+		t.Fatalf("config identity = %#v", got)
+	}
+	if got.SessionName != "gt-witness-review" {
+		t.Fatalf("SessionName = %q, want gt-witness-review", got.SessionName)
+	}
+	if got.ReasoningEffort != "high" {
+		t.Fatalf("ReasoningEffort = %q, want high", got.ReasoningEffort)
+	}
+	if got.IssueID == "" {
+		t.Fatal("IssueID = empty, want persisted value")
+	}
+	if got.IssueID != "slotmachine-910.3.7" {
+		t.Fatalf("IssueID = %q, want slotmachine-910.3.7", got.IssueID)
+	}
+	if got.RigName != "gastown" {
+		t.Fatalf("RigName = %q, want gastown", got.RigName)
 	}
 }
