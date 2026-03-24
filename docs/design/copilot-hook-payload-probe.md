@@ -107,9 +107,87 @@ As of the current Copilot runtime hardening work:
 - Gastown does **not** yet assume a stable `postToolUse` payload contract
 - manual verification guidance remains the correct fallback for side effects
 
+## Probe Findings (2026-03-24)
+
+We ran a real scratch probe in `/tmp/gastown-copilot-hook-probe` with temporary
+`preToolUse` and `postToolUse` loggers, then triggered:
+
+- `pwd`
+- `sh -lc "echo hook-probe-success > ok.txt"`
+- `sh -lc "echo hook-probe-fail >&2; exit 17"`
+
+Observed payload behavior:
+
+- `preToolUse` exists and includes:
+  - `sessionId`
+  - `timestamp`
+  - `cwd`
+  - `toolName`
+  - `toolArgs` as a JSON-encoded string
+- `postToolUse` exists and includes:
+  - `sessionId`
+  - `timestamp`
+  - `cwd`
+  - `toolName`
+  - `toolArgs` as a structured object
+  - `toolResult`
+
+Redacted sample for a successful bash tool:
+
+```json
+{
+  "toolName": "bash",
+  "toolArgs": {
+    "command": "pwd",
+    "description": "Print working directory",
+    "mode": "sync",
+    "initial_wait": 30
+  },
+  "toolResult": {
+    "resultType": "success",
+    "textResultForLlm": "/tmp/gastown-copilot-hook-probe\n<exited with exit code 0>"
+  }
+}
+```
+
+Redacted sample for a failing bash tool:
+
+```json
+{
+  "toolName": "bash",
+  "toolArgs": {
+    "command": "sh -lc \"echo hook-probe-fail >&2; exit 17\"",
+    "description": "Run failing hook probe",
+    "mode": "sync",
+    "initial_wait": 30
+  },
+  "toolResult": {
+    "resultType": "success",
+    "textResultForLlm": "hook-probe-fail\n<exited with exit code 17>"
+  }
+}
+```
+
+### Conclusion
+
+This is **not** strong enough for production postcondition enforcement yet.
+
+Why:
+
+- there is no structured exit-code field
+- there is no separate stdout/stderr field
+- `toolResult.resultType` remained `success` even when the bash command exited 17
+- callers would need to parse human-oriented `textResultForLlm`, which is brittle
+
+So the current production recommendation stays the same:
+
+- use `preToolUse` for narrow request-time guards
+- use explicit postcondition checks in agent instructions and operator workflows
+- do not build production `postToolUse` verification around `textResultForLlm`
+
 ## Next Step
 
 After collecting real probe samples, add one of:
 
-- a small fixture doc with redacted sample payloads, or
 - a targeted production `postToolUse` verifier if the payload is strong enough
+- or keep manual verification guidance if the payload remains too lossy

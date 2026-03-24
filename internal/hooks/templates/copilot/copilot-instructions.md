@@ -33,3 +33,5 @@ Do not claim a side effect succeeded until you verify it.
   or `gt mail inbox <recipient>`
 - After creating files, verify they exist and contain the expected content
 - After nudging, verify with queue or session evidence when possible
+- Do not trust a shell command summary alone when the command affects external
+  state; verify the actual postcondition
