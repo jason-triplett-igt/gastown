@@ -132,70 +132,86 @@ func runExternalCopilotOwner(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				continue
 			}
-			recordOwnerBusyTransition(cfg, session.SessionID, true, &busyState)
-			_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: true, UpdatedAt: time.Now().UTC()})
-			request, err := runtime.ReadExternalOwnerRequest(claimedPath)
-			if err != nil {
-				_ = runtime.RemoveExternalOwnerRequest(claimedPath)
-				recordOwnerBusyTransition(cfg, session.SessionID, false, &busyState)
-				_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: false, UpdatedAt: time.Now().UTC()})
-				continue
-			}
-			response := runtime.ExternalCopilotOwnerResponse{ID: request.ID, CreatedAt: time.Now().UTC()}
-			writeResponse := true
-			switch request.Kind {
-			case runtime.ExternalOwnerRequestKindSend:
-				_, err = session.Send(context.Background(), copilot.MessageOptions{Prompt: request.Message})
-			case runtime.ExternalOwnerRequestKindAsk:
-				var event *copilot.SessionEvent
-				requestCtx := context.Background()
-				cancel := func() {}
-				if request.TimeoutMS > 0 {
-					requestCtx, cancel = context.WithTimeout(context.Background(), time.Duration(request.TimeoutMS)*time.Millisecond)
-				}
-				state := newOwnerRequestState(request.ID, request.Message)
+			_ = processExternalOwnerRequest(cfg, session, claimedPath, ownerPID, &busyState, func(state *ownerRequestState) {
 				ownerStateMu.Lock()
 				activeState = state
 				ownerStateMu.Unlock()
-				event, err = ownerSendAndWaitForReply(requestCtx, session, state)
+			}, func() {
 				ownerStateMu.Lock()
 				activeState = nil
 				ownerStateMu.Unlock()
-				cancel()
-				if err == nil && event != nil && event.Data.Content != nil {
-					response.Content = strings.TrimSpace(*event.Data.Content)
-				}
-				if err == nil && strings.TrimSpace(response.Content) == "" {
-					if reply := state.reply(); reply != nil && reply.Data.Content != nil {
-						response.Content = strings.TrimSpace(*reply.Data.Content)
-					}
-				}
-				if err == nil && strings.TrimSpace(response.Content) == "" && state.hasToolActivity() {
-					response.Content = "DONE"
-				}
-			default:
-				err = fmt.Errorf("unsupported owner request kind: %s", request.Kind)
-			}
-			if err != nil {
-				response.Error = err.Error()
-			}
-			if strings.TrimSpace(response.Content) == "" && strings.TrimSpace(response.Error) == "" {
-				writeResponse = false
-			}
-			if copilotutil.DebugOwnerToolsEnabled() {
-				fmt.Fprintf(os.Stderr, "[owner-loop] request=%s kind=%s write=%t error=%q content=%q\n", request.ID, request.Kind, writeResponse, response.Error, response.Content)
-			}
-			if writeResponse {
-				_ = runtime.WriteExternalOwnerResponse(cfg.TownRoot, cfg.SessionName, response)
-			}
-			_ = runtime.RemoveExternalOwnerRequest(claimedPath)
-			recordOwnerBusyTransition(cfg, session.SessionID, false, &busyState)
-			_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: false, UpdatedAt: time.Now().UTC(), Error: response.Error})
+			})
 		}
 		recordOwnerBusyTransition(cfg, session.SessionID, false, &busyState)
 		_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: false, UpdatedAt: time.Now().UTC()})
 		time.Sleep(200 * time.Millisecond)
 	}
+}
+
+func processExternalOwnerRequest(cfg *runtime.ExternalCopilotOwnerConfig, session *copilot.Session, claimedPath string, ownerPID int, busyState *bool, setActive func(*ownerRequestState), clearActive func()) error {
+	if cfg == nil || session == nil {
+		return fmt.Errorf("owner config and session are required")
+	}
+	recordOwnerBusyTransition(cfg, session.SessionID, true, busyState)
+	_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: true, UpdatedAt: time.Now().UTC()})
+	request, err := runtime.ReadExternalOwnerRequest(claimedPath)
+	if err != nil {
+		_ = runtime.RemoveExternalOwnerRequest(claimedPath)
+		recordOwnerBusyTransition(cfg, session.SessionID, false, busyState)
+		_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: false, UpdatedAt: time.Now().UTC()})
+		return err
+	}
+	response := runtime.ExternalCopilotOwnerResponse{ID: request.ID, CreatedAt: time.Now().UTC()}
+	writeResponse := true
+	switch request.Kind {
+	case runtime.ExternalOwnerRequestKindSend:
+		_, err = session.Send(context.Background(), copilot.MessageOptions{Prompt: request.Message})
+	case runtime.ExternalOwnerRequestKindAsk:
+		var event *copilot.SessionEvent
+		requestCtx := context.Background()
+		cancel := func() {}
+		if request.TimeoutMS > 0 {
+			requestCtx, cancel = context.WithTimeout(context.Background(), time.Duration(request.TimeoutMS)*time.Millisecond)
+		}
+		state := newOwnerRequestState(request.ID, request.Message)
+		if setActive != nil {
+			setActive(state)
+		}
+		event, err = ownerSendAndWaitForReply(requestCtx, session, state)
+		if clearActive != nil {
+			clearActive()
+		}
+		cancel()
+		if err == nil && event != nil && event.Data.Content != nil {
+			response.Content = strings.TrimSpace(*event.Data.Content)
+		}
+		if err == nil && strings.TrimSpace(response.Content) == "" {
+			if reply := state.reply(); reply != nil && reply.Data.Content != nil {
+				response.Content = strings.TrimSpace(*reply.Data.Content)
+			}
+		}
+		if err == nil && strings.TrimSpace(response.Content) == "" && state.hasToolActivity() {
+			response.Content = "DONE"
+		}
+	default:
+		err = fmt.Errorf("unsupported owner request kind: %s", request.Kind)
+	}
+	if err != nil {
+		response.Error = err.Error()
+	}
+	if strings.TrimSpace(response.Content) == "" && strings.TrimSpace(response.Error) == "" {
+		writeResponse = false
+	}
+	if copilotutil.DebugOwnerToolsEnabled() {
+		fmt.Fprintf(os.Stderr, "[owner-loop] request=%s kind=%s write=%t error=%q content=%q\n", request.ID, request.Kind, writeResponse, response.Error, response.Content)
+	}
+	if writeResponse {
+		_ = runtime.WriteExternalOwnerResponse(cfg.TownRoot, cfg.SessionName, response)
+	}
+	_ = runtime.RemoveExternalOwnerRequest(claimedPath)
+	recordOwnerBusyTransition(cfg, session.SessionID, false, busyState)
+	_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: false, UpdatedAt: time.Now().UTC(), Error: response.Error})
+	return err
 }
 
 func recordOwnerBusyTransition(cfg *runtime.ExternalCopilotOwnerConfig, runtimeSessionID string, busy bool, current *bool) {
