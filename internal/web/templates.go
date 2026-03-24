@@ -92,6 +92,9 @@ type SessionRow struct {
 	Worker   string // Worker name for polecats/crew
 	Activity string // Age since last activity
 	IsAlive  bool   // Whether Claude is running in session
+	Ready    bool   // Whether the managed runtime is ready
+	Busy     bool   // Whether the managed runtime is busy
+	State    string // running, busy, degraded, or stopped
 }
 
 // HookRow represents a hooked bead (work pinned to an agent).
@@ -232,7 +235,7 @@ func LoadTemplates() (*template.Template, error) {
 		"dogStateClass":      dogStateClass,
 		"queueStatusClass":   queueStatusClass,
 		"polecatStatusClass": polecatStatusClass,
-		"activityTypeClass": activityTypeClass,
+		"activityTypeClass":  activityTypeClass,
 		"contains": func(s, substr string) bool {
 			return strings.Contains(s, substr)
 		},

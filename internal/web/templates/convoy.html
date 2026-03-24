@@ -372,6 +372,7 @@
                                 <th>Role</th>
                                 <th>Rig</th>
                                 <th>Worker</th>
+                                <th>Status</th>
                                 <th>Activity</th>
                             </tr>
                         </thead>
@@ -383,6 +384,12 @@
                                 </td>
                                 <td>{{.Rig}}</td>
                                 <td>{{.Worker}}</td>
+                                <td>
+                                    {{if eq .State "busy"}}<span class="badge badge-blue">Busy</span>
+                                    {{else if eq .State "degraded"}}<span class="badge badge-yellow">Degraded</span>
+                                    {{else if eq .State "running"}}<span class="badge badge-green">Running</span>
+                                    {{else}}<span class="badge badge-muted">Stopped</span>{{end}}
+                                </td>
                                 <td>{{.Activity}}</td>
                             </tr>
                             {{end}}

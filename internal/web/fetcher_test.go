@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/activity"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	runtimepkg "github.com/steveyegge/gastown/internal/runtime"
 )
 
 func TestCalculateWorkStatus(t *testing.T) {
@@ -841,6 +842,26 @@ func TestFetchMayor_UsesResolvedRuntime(t *testing.T) {
 	}
 	if status.LastActivity == "" {
 		t.Fatal("expected LastActivity to be populated")
+	}
+}
+
+func TestSessionRowState(t *testing.T) {
+	tests := []struct {
+		name   string
+		status runtimepkg.SessionStatus
+		want   string
+	}{
+		{name: "stopped", status: runtimepkg.SessionStatus{Alive: false}, want: "stopped"},
+		{name: "degraded", status: runtimepkg.SessionStatus{Alive: true, Ready: false}, want: "degraded"},
+		{name: "busy", status: runtimepkg.SessionStatus{Alive: true, Ready: true, Busy: true}, want: "busy"},
+		{name: "running", status: runtimepkg.SessionStatus{Alive: true, Ready: true, Busy: false}, want: "running"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sessionRowState(tt.status); got != tt.want {
+				t.Fatalf("sessionRowState() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

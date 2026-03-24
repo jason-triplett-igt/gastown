@@ -655,6 +655,32 @@ func TestConvoyHandler_FullDashboard(t *testing.T) {
 	}
 }
 
+func TestConvoyHandler_SessionsPanelRendersRuntimeHealthBadges(t *testing.T) {
+	mock := &MockConvoyFetcher{
+		Sessions: []SessionRow{
+			{Name: "hq-mayor", Role: "mayor", Activity: "1m ago", IsAlive: true, Ready: false, Busy: false, State: "degraded"},
+			{Name: "gt-gastown-refinery", Role: "refinery", Rig: "gastown", Activity: "30s ago", IsAlive: true, Ready: true, Busy: true, State: "busy"},
+			{Name: "gt-gastown-witness", Role: "witness", Rig: "gastown", Activity: "2m ago", IsAlive: true, Ready: true, Busy: false, State: "running"},
+		},
+	}
+
+	handler, err := NewConvoyHandler(mock, 8*time.Second, "test-token")
+	if err != nil {
+		t.Fatalf("NewConvoyHandler() error = %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	body := w.Body.String()
+	for _, want := range []string{"📟 Sessions", "badge badge-yellow\">Degraded<", "badge badge-blue\">Busy<", "badge badge-green\">Running<"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("response body missing %q", want)
+		}
+	}
+}
+
 // =============================================================================
 // End-to-End Tests with httptest.Server
 // =============================================================================
@@ -808,7 +834,7 @@ func TestE2E_Server_MergeQueueEmpty(t *testing.T) {
 	mock := &MockConvoyFetcher{
 		Convoys:    []ConvoyRow{},
 		MergeQueue: []MergeQueueRow{},
-		Workers:   []WorkerRow{},
+		Workers:    []WorkerRow{},
 	}
 
 	handler, err := NewConvoyHandler(mock, 8*time.Second, "test-token")
@@ -1207,19 +1233,19 @@ func (m *CountingMockFetcher) FetchConvoys() ([]ConvoyRow, error) {
 func (m *CountingMockFetcher) FetchMergeQueue() ([]MergeQueueRow, error) {
 	return m.inner.FetchMergeQueue()
 }
-func (m *CountingMockFetcher) FetchWorkers() ([]WorkerRow, error)       { return m.inner.FetchWorkers() }
-func (m *CountingMockFetcher) FetchMail() ([]MailRow, error)            { return m.inner.FetchMail() }
-func (m *CountingMockFetcher) FetchRigs() ([]RigRow, error)             { return m.inner.FetchRigs() }
-func (m *CountingMockFetcher) FetchDogs() ([]DogRow, error)             { return m.inner.FetchDogs() }
+func (m *CountingMockFetcher) FetchWorkers() ([]WorkerRow, error) { return m.inner.FetchWorkers() }
+func (m *CountingMockFetcher) FetchMail() ([]MailRow, error)      { return m.inner.FetchMail() }
+func (m *CountingMockFetcher) FetchRigs() ([]RigRow, error)       { return m.inner.FetchRigs() }
+func (m *CountingMockFetcher) FetchDogs() ([]DogRow, error)       { return m.inner.FetchDogs() }
 func (m *CountingMockFetcher) FetchEscalations() ([]EscalationRow, error) {
 	return m.inner.FetchEscalations()
 }
-func (m *CountingMockFetcher) FetchHealth() (*HealthRow, error)    { return m.inner.FetchHealth() }
-func (m *CountingMockFetcher) FetchQueues() ([]QueueRow, error)    { return m.inner.FetchQueues() }
+func (m *CountingMockFetcher) FetchHealth() (*HealthRow, error)     { return m.inner.FetchHealth() }
+func (m *CountingMockFetcher) FetchQueues() ([]QueueRow, error)     { return m.inner.FetchQueues() }
 func (m *CountingMockFetcher) FetchSessions() ([]SessionRow, error) { return m.inner.FetchSessions() }
-func (m *CountingMockFetcher) FetchHooks() ([]HookRow, error)      { return m.inner.FetchHooks() }
-func (m *CountingMockFetcher) FetchMayor() (*MayorStatus, error)   { return m.inner.FetchMayor() }
-func (m *CountingMockFetcher) FetchIssues() ([]IssueRow, error)    { return m.inner.FetchIssues() }
+func (m *CountingMockFetcher) FetchHooks() ([]HookRow, error)       { return m.inner.FetchHooks() }
+func (m *CountingMockFetcher) FetchMayor() (*MayorStatus, error)    { return m.inner.FetchMayor() }
+func (m *CountingMockFetcher) FetchIssues() ([]IssueRow, error)     { return m.inner.FetchIssues() }
 func (m *CountingMockFetcher) FetchActivity() ([]ActivityRow, error) {
 	return m.inner.FetchActivity()
 }

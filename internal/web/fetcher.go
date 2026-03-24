@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
+	runtimepkg "github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -1428,6 +1429,8 @@ func (f *LiveConvoyFetcher) FetchSessions() ([]SessionRow, error) {
 		row := SessionRow{
 			Name:    name,
 			IsAlive: true, // Session exists
+			Ready:   true,
+			State:   "running",
 		}
 
 		// Parse activity timestamp
@@ -1442,6 +1445,13 @@ func (f *LiveConvoyFetcher) FetchSessions() ([]SessionRow, error) {
 			row.Rig = identity.Rig
 			row.Role = string(identity.Role)
 			row.Worker = identity.Name
+		}
+
+		if status, ok := f.managedSessionStatusForRow(row); ok {
+			row.IsAlive = status.Alive
+			row.Ready = status.Ready
+			row.Busy = status.Busy
+			row.State = sessionRowState(status)
 		}
 
 		rows = append(rows, row)
@@ -1459,6 +1469,61 @@ func (f *LiveConvoyFetcher) FetchSessions() ([]SessionRow, error) {
 	})
 
 	return rows, nil
+}
+
+func (f *LiveConvoyFetcher) managedSessionStatusForRow(row SessionRow) (runtimepkg.SessionStatus, bool) {
+	if f == nil {
+		return runtimepkg.SessionStatus{}, false
+	}
+	store := runtimepkg.NewFileSessionBindingStore(f.townRoot)
+	binding, err := store.Load(context.Background(), "", row.Role, row.Rig, row.Worker)
+	if err != nil || binding == nil || strings.TrimSpace(binding.RuntimeSessionID) == "" {
+		return runtimepkg.SessionStatus{}, false
+	}
+	if strings.TrimSpace(binding.SessionName) != strings.TrimSpace(row.Name) {
+		return runtimepkg.SessionStatus{}, false
+	}
+	rigPath := ""
+	if strings.TrimSpace(binding.RigName) != "" {
+		rigPath = filepath.Join(f.townRoot, binding.RigName)
+	}
+	adapter := runtimepkg.NewTmuxSessionAdapter(tmux.NewTmux()).WithBindingStore(store)
+	managed, err := adapter.Lookup(context.Background(), runtimepkg.SessionLookupRequest{
+		SessionID:   binding.RuntimeSessionID,
+		Provider:    binding.Provider,
+		IssueID:     binding.IssueID,
+		SessionName: binding.SessionName,
+		Role:        binding.Role,
+		TownRoot:    f.townRoot,
+		RigName:     binding.RigName,
+		RigPath:     rigPath,
+		AgentName:   binding.AgentName,
+		WorkDir:     binding.WorkDir,
+		Metadata:    binding.Metadata,
+	})
+	if err != nil || managed == nil {
+		return runtimepkg.SessionStatus{}, false
+	}
+	status, statusErr := managed.Status(context.Background())
+	if statusErr != nil {
+		status.Ready = false
+		status.Busy = false
+		status.Alive = status.Alive || strings.TrimSpace(binding.RuntimeSessionID) != ""
+	}
+	return status, true
+}
+
+func sessionRowState(status runtimepkg.SessionStatus) string {
+	if !status.Alive {
+		return "stopped"
+	}
+	if !status.Ready {
+		return "degraded"
+	}
+	if status.Busy {
+		return "busy"
+	}
+	return "running"
 }
 
 // FetchHooks returns all hooked beads (work pinned to agents).
