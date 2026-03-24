@@ -152,6 +152,8 @@ var mailInboxCmd = &cobra.Command{
 
 If no address is specified, shows the current context's inbox.
 Use --identity for polecats to explicitly specify their identity.
+Use --identity for any role when you want to force a specific mailbox instead
+of the auto-detected sender identity.
 
 By default, shows all messages. Use --unread to filter to unread only,
 or --all to explicitly show all messages (read and unread).
@@ -276,12 +278,14 @@ Exit codes (--inject mode):
   0 - Always (hooks should never block)
   Output: system-reminder if mail exists, silent if no mail
 
-Use --identity for polecats to explicitly specify their identity.
+Use --identity to explicitly specify which inbox to check instead of relying
+on auto-detection from role or current working directory.
 
 Examples:
   gt mail check                           # Simple check (auto-detect identity)
   gt mail check --inject                  # For hooks
-  gt mail check --identity greenplace/Toast  # Explicit polecat identity`,
+  gt mail check --identity greenplace/Toast  # Explicit polecat identity
+  gt mail check --identity mayor/         # Explicit mayor inbox`,
 	RunE: runMailCheck,
 }
 
