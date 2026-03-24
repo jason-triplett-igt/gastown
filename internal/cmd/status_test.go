@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -220,6 +221,78 @@ func TestOutputStatusText_IncludesDNDSection(t *testing.T) {
 	}
 	if !strings.Contains(out, "on") {
 		t.Fatalf("expected DND state 'on' in status output, got: %q", out)
+	}
+}
+
+func TestOutputStatusJSONIncludesRuntimeHealthFields(t *testing.T) {
+	status := TownStatus{
+		Agents: []AgentRuntime{{
+			Name:        "mayor",
+			Running:     true,
+			Ready:       false,
+			Busy:        true,
+			StatusError: "owner degraded",
+		}},
+		Rigs: []RigStatus{{
+			Name: "gastown",
+			Agents: []AgentRuntime{{
+				Name:    "witness",
+				Running: true,
+				Ready:   true,
+				Busy:    false,
+			}},
+		}},
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldStdout := os.Stdout
+	os.Stdout = w
+	if err := outputStatusJSON(status); err != nil {
+		_ = w.Close()
+		os.Stdout = oldStdout
+		t.Fatalf("outputStatusJSON() error = %v", err)
+	}
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var parsed struct {
+		Agents []struct {
+			Name        string `json:"name"`
+			Running     bool   `json:"running"`
+			Ready       bool   `json:"ready"`
+			Busy        bool   `json:"busy"`
+			StatusError string `json:"status_error"`
+		} `json:"agents"`
+		Rigs []struct {
+			Agents []struct {
+				Name  string `json:"name"`
+				Ready bool   `json:"ready"`
+				Busy  bool   `json:"busy"`
+			} `json:"agents"`
+		} `json:"rigs"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(parsed.Agents) != 1 || parsed.Agents[0].Name != "mayor" {
+		t.Fatalf("parsed agents = %#v", parsed.Agents)
+	}
+	if !parsed.Agents[0].Running || parsed.Agents[0].Ready || !parsed.Agents[0].Busy || parsed.Agents[0].StatusError != "owner degraded" {
+		t.Fatalf("parsed agent = %#v, want running=true ready=false busy=true status_error", parsed.Agents[0])
+	}
+	if len(parsed.Rigs) != 1 || len(parsed.Rigs[0].Agents) != 1 {
+		t.Fatalf("parsed rigs = %#v", parsed.Rigs)
+	}
+	if !parsed.Rigs[0].Agents[0].Ready || parsed.Rigs[0].Agents[0].Busy {
+		t.Fatalf("parsed rig agent = %#v, want ready=true busy=false", parsed.Rigs[0].Agents[0])
 	}
 }
 

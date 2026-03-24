@@ -928,9 +928,12 @@ func parseCrewListOutput(output string) []string {
 func parseAgentsFromStatus(jsonStr string) []OptionItem {
 	var status struct {
 		Agents []struct {
-			Name    string `json:"name"`
-			Running bool   `json:"running"`
-			State   string `json:"state"`
+			Name        string `json:"name"`
+			Running     bool   `json:"running"`
+			Ready       bool   `json:"ready"`
+			Busy        bool   `json:"busy"`
+			State       string `json:"state"`
+			StatusError string `json:"status_error"`
 		} `json:"agents"`
 	}
 
@@ -942,7 +945,11 @@ func parseAgentsFromStatus(jsonStr string) []OptionItem {
 	for _, a := range status.Agents {
 		state := a.State
 		if state == "" {
-			if a.Running {
+			if a.Running && !a.Ready {
+				state = "degraded"
+			} else if a.Busy {
+				state = "busy"
+			} else if a.Running {
 				state = "running"
 			} else {
 				state = "stopped"

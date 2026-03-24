@@ -14,6 +14,29 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 )
 
+func TestParseAgentsFromStatusUsesRuntimeHealthFields(t *testing.T) {
+	jsonStr := `{
+	  "agents": [
+	    {"name": "mayor", "running": true, "ready": false, "busy": true},
+	    {"name": "deacon", "running": true, "ready": true, "busy": false},
+	    {"name": "witness", "running": false, "ready": false, "busy": false}
+	  ]
+	}`
+	agents := parseAgentsFromStatus(jsonStr)
+	if len(agents) != 3 {
+		t.Fatalf("parseAgentsFromStatus() returned %d agents, want 3", len(agents))
+	}
+	if agents[0].Status != "degraded" || !agents[0].Running {
+		t.Fatalf("agents[0] = %#v, want degraded running agent", agents[0])
+	}
+	if agents[1].Status != "running" || !agents[1].Running {
+		t.Fatalf("agents[1] = %#v, want running agent", agents[1])
+	}
+	if agents[2].Status != "stopped" || agents[2].Running {
+		t.Fatalf("agents[2] = %#v, want stopped agent", agents[2])
+	}
+}
+
 func TestValidateCommand(t *testing.T) {
 	tests := []struct {
 		name      string
