@@ -301,6 +301,9 @@ func (s *externalCopilotManagedSession) Status(_ context.Context) (SessionStatus
 		}
 		alive := discovery.OwnerAlive && strings.TrimSpace(s.runtimeID) != ""
 		ready := alive && discovery.HeartbeatLive
+		if discovery.Status != nil && discovery.Status.Ready != nil {
+			ready = ready && *discovery.Status.Ready
+		}
 		busy := false
 		if ready && discovery.Status != nil {
 			busy = discovery.Status.Busy

@@ -53,6 +53,64 @@ func TestRecordOwnerBusyTransitionEmitsBusyAndIdleEvents(t *testing.T) {
 	}
 }
 
+func TestRecordOwnerReadyTransitionEmitsReadyAndDegradedEvents(t *testing.T) {
+	cfg := &runtime.ExternalCopilotOwnerConfig{
+		IssueID:     "slotmachine-910.9.9",
+		Role:        "mayor",
+		Provider:    "copilot-external",
+		SessionName: "hq-mayor",
+		WorkDir:     filepath.Join(t.TempDir(), "mayor"),
+	}
+	ready := false
+	type recorded struct {
+		eventType string
+		payload   map[string]interface{}
+	}
+	var got []recorded
+	oldRecorder := recordOwnerLifecycleEvent
+	t.Cleanup(func() { recordOwnerLifecycleEvent = oldRecorder })
+	recordOwnerLifecycleEvent = func(eventType, actor string, payload map[string]interface{}) error {
+		got = append(got, recorded{eventType: eventType, payload: payload})
+		return nil
+	}
+
+	recordOwnerReadyTransition(cfg, "runtime-1", true, "", &ready)
+	recordOwnerReadyTransition(cfg, "runtime-1", true, "", &ready)
+	recordOwnerReadyTransition(cfg, "runtime-1", false, "tool execution failed", &ready)
+
+	if len(got) != 2 {
+		t.Fatalf("recorded events = %d, want 2", len(got))
+	}
+	if got[0].eventType != runtime.TypeRuntimeSessionReady || got[1].eventType != runtime.TypeRuntimeSessionDegraded {
+		t.Fatalf("events = %#v", got)
+	}
+	if got[0].payload["ready"] != true {
+		t.Fatalf("ready payload = %#v", got[0].payload)
+	}
+	if got[1].payload["ready"] != false || got[1].payload["error"] != "tool execution failed" {
+		t.Fatalf("degraded payload = %#v", got[1].payload)
+	}
+}
+
+func TestRecordOwnerReadyTransitionNoopsOnRepeatedReadyState(t *testing.T) {
+	cfg := &runtime.ExternalCopilotOwnerConfig{Role: "mayor", SessionName: "hq-mayor"}
+	ready := true
+	var got []string
+	oldRecorder := recordOwnerLifecycleEvent
+	t.Cleanup(func() { recordOwnerLifecycleEvent = oldRecorder })
+	recordOwnerLifecycleEvent = func(eventType, actor string, payload map[string]interface{}) error {
+		got = append(got, eventType)
+		return nil
+	}
+
+	recordOwnerReadyTransition(cfg, "runtime-1", true, "", &ready)
+	recordOwnerReadyTransition(cfg, "runtime-1", true, "", &ready)
+
+	if !reflect.DeepEqual(got, []string(nil)) {
+		t.Fatalf("events = %#v, want none", got)
+	}
+}
+
 func TestRecordOwnerBusyTransitionNoopsOnRepeatedState(t *testing.T) {
 	cfg := &runtime.ExternalCopilotOwnerConfig{Role: "mayor", SessionName: "hq-mayor"}
 	busy := false
@@ -111,5 +169,8 @@ func TestProcessExternalOwnerRequestClearsBusyStateOnReadFailure(t *testing.T) {
 	}
 	if time.Since(status.UpdatedAt) > time.Second {
 		t.Fatalf("UpdatedAt = %v, want recent timestamp", status.UpdatedAt)
+	}
+	if status.Ready == nil || !*status.Ready {
+		t.Fatalf("status = %#v, want Ready=true after read failure cleanup", status)
 	}
 }

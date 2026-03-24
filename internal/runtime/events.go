@@ -7,12 +7,14 @@ import (
 )
 
 const (
-	TypeRuntimeSessionStart  = "runtime_session_start"
-	TypeRuntimeSessionResume = "runtime_session_resume"
-	TypeRuntimeSessionClose  = "runtime_session_close"
-	TypeRuntimeSessionStatus = "runtime_session_status"
-	TypeRuntimeSessionBusy   = "runtime_session_busy"
-	TypeRuntimeSessionIdle   = "runtime_session_idle"
+	TypeRuntimeSessionStart    = "runtime_session_start"
+	TypeRuntimeSessionResume   = "runtime_session_resume"
+	TypeRuntimeSessionClose    = "runtime_session_close"
+	TypeRuntimeSessionStatus   = "runtime_session_status"
+	TypeRuntimeSessionReady    = "runtime_session_ready"
+	TypeRuntimeSessionDegraded = "runtime_session_degraded"
+	TypeRuntimeSessionBusy     = "runtime_session_busy"
+	TypeRuntimeSessionIdle     = "runtime_session_idle"
 )
 
 type LifecycleRecorder interface {

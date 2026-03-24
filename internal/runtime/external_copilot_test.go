@@ -294,3 +294,28 @@ func TestExternalCopilotManagedSessionStatusSurfacesOwnerError(t *testing.T) {
 		t.Fatalf("status = %#v, want alive=true ready=false busy=false", status)
 	}
 }
+
+func TestExternalCopilotManagedSessionStatusRequiresExplicitReadyBit(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	sessionName := "hq-mayor"
+	pid := os.Getpid()
+	if err := WriteExternalOwnerStatus(townRoot, sessionName, ExternalCopilotOwnerStatus{OwnerPID: pid, RuntimeSessionID: "runtime-1", Ready: BoolPtr(false), UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("WriteExternalOwnerStatus() error = %v", err)
+	}
+	sess := &externalCopilotManagedSession{
+		provider:    "copilot-external",
+		role:        "mayor",
+		sessionName: sessionName,
+		runtimeID:   "runtime-1",
+		townRoot:    townRoot,
+		metadata:    OwnerBindingMetadata(ExternalOwnerDir(townRoot, sessionName), pid),
+	}
+	status, err := sess.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if !status.Alive || status.Ready || status.Busy {
+		t.Fatalf("status = %#v, want alive=true ready=false busy=false", status)
+	}
+}
