@@ -891,11 +891,97 @@ func TestSessionManagerResumeBoundSessionUsesStoredBinding(t *testing.T) {
 	if adapter.resumeReq.SessionID != "runtime-123" {
 		t.Fatalf("resume session id = %q, want runtime-123", adapter.resumeReq.SessionID)
 	}
+	if adapter.resumeReq.SessionName != "gt-toast" {
+		t.Fatalf("resume session name = %q, want gt-toast", adapter.resumeReq.SessionName)
+	}
 	if adapter.resumeReq.IssueID != "slotmachine-910" {
 		t.Fatalf("resume issue id = %q, want slotmachine-910", adapter.resumeReq.IssueID)
 	}
+	if adapter.resumeReq.WorkDir != filepath.Join(rigPath, "polecats", "toast") {
+		t.Fatalf("resume workdir = %q, want stored polecat workdir", adapter.resumeReq.WorkDir)
+	}
 	if err != nil {
 		t.Fatalf("Start() error = %v, want resume path success", err)
+	}
+}
+
+func TestSessionManagerResumeBoundExternalSessionPreservesIssueAndWorkdir(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	workDir := filepath.Join(rigPath, "polecats", "toast")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &rig.Rig{Name: "gastown", Path: rigPath, Polecats: []string{"toast"}}
+	managed := &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: true}}
+	adapter := &fakeSessionAdapter{resumeSession: managed}
+	store := &fakeBindingStore{binding: &runtimepkg.SessionBinding{
+		IssueID:          "slotmachine-910",
+		Role:             "polecat",
+		RigName:          "gastown",
+		AgentName:        "toast",
+		Provider:         "copilot-external",
+		SessionName:      "gt-toast",
+		RuntimeSessionID: "runtime-123",
+		WorkDir:          workDir,
+	}}
+	m := &SessionManager{tmux: tmux.NewTmux(), rig: r, adapter: adapter, bindings: store}
+
+	if err := m.Start("toast", SessionStartOptions{Issue: "slotmachine-910", WorkDir: workDir}); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if adapter.resumeReq == nil {
+		t.Fatal("resumeReq = nil, want resume path")
+	}
+	if adapter.resumeReq.Provider != "copilot-external" {
+		t.Fatalf("resume provider = %q, want copilot-external", adapter.resumeReq.Provider)
+	}
+	if adapter.resumeReq.IssueID != "slotmachine-910" {
+		t.Fatalf("resume issue id = %q, want slotmachine-910", adapter.resumeReq.IssueID)
+	}
+	if adapter.resumeReq.WorkDir != workDir {
+		t.Fatalf("resume workdir = %q, want %q", adapter.resumeReq.WorkDir, workDir)
+	}
+	if adapter.resumeReq.SessionID != "runtime-123" {
+		t.Fatalf("resume runtime session id = %q, want runtime-123", adapter.resumeReq.SessionID)
+	}
+}
+
+func TestPolecatResumeFailureDoesNotCorruptBookkeeping(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	workDir := filepath.Join(rigPath, "polecats", "toast")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := &rig.Rig{Name: "gastown", Path: rigPath, Polecats: []string{"toast"}}
+	store := &fakeBindingStore{binding: &runtimepkg.SessionBinding{
+		IssueID:          "slotmachine-910",
+		Role:             "polecat",
+		RigName:          "gastown",
+		AgentName:        "toast",
+		Provider:         "copilot-external",
+		SessionName:      "gt-toast",
+		RuntimeSessionID: "runtime-123",
+		WorkDir:          workDir,
+	}}
+	m := &SessionManager{tmux: tmux.NewTmux(), rig: r, adapter: &fakeSessionAdapter{err: fmt.Errorf("resume boom")}, bindings: store}
+
+	err := m.Start("toast", SessionStartOptions{Issue: "slotmachine-910", WorkDir: workDir})
+	if err == nil {
+		t.Fatal("Start() error = nil, want resume failure")
+	}
+	if !strings.Contains(err.Error(), "resuming bound session: resume boom") {
+		t.Fatalf("Start() error = %v, want wrapped resume failure", err)
+	}
+	binding, bindErr := m.BindingForPolecat("toast")
+	if bindErr != nil {
+		t.Fatalf("BindingForPolecat() error = %v", bindErr)
+	}
+	if binding == nil || binding.RuntimeSessionID != "runtime-123" || binding.WorkDir != workDir {
+		t.Fatalf("binding = %#v, want preserved runtime bookkeeping", binding)
 	}
 }
 
