@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -862,6 +863,65 @@ func TestSessionRowState(t *testing.T) {
 				t.Fatalf("sessionRowState() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestManagedSessionStatusForRowReadsOwnerManagedBinding(t *testing.T) {
+	townRoot := t.TempDir()
+	sessionName := "gt-gastown-witness"
+	pid := os.Getpid()
+	rigPath := filepath.Join(townRoot, "gastown")
+	settings := config.NewRigSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{
+		"copilot-external": {
+			Provider: "copilot",
+			Command:  "copilot",
+			CLIURL:   "http://127.0.0.1:4321",
+		},
+	}
+	settings.RoleAgents = map[string]string{"witness": "copilot-external"}
+	if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(settings) error = %v", err)
+	}
+	if err := config.SaveRigSettings(filepath.Join(rigPath, "settings", "config.json"), settings); err != nil {
+		t.Fatalf("SaveRigSettings() error = %v", err)
+	}
+	store := runtimepkg.NewFileSessionBindingStore(townRoot)
+	binding := runtimepkg.SessionBinding{
+		IssueID:          "slotmachine-910.7.3",
+		Role:             "witness",
+		RigName:          "gastown",
+		AgentName:        "witness",
+		Provider:         "copilot-external",
+		SessionName:      sessionName,
+		RuntimeSessionID: "runtime-xyz",
+		WorkDir:          filepath.Join(rigPath, "witness"),
+		Metadata: runtimepkg.OwnerBindingMetadata(
+			runtimepkg.ExternalOwnerDir(townRoot, sessionName),
+			pid,
+		),
+	}
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	ready := false
+	if err := runtimepkg.WriteExternalOwnerStatus(townRoot, sessionName, runtimepkg.ExternalCopilotOwnerStatus{
+		OwnerPID:         pid,
+		RuntimeSessionID: "runtime-xyz",
+		Ready:            &ready,
+		Busy:             true,
+		Error:            "owner degraded",
+		UpdatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("WriteExternalOwnerStatus() error = %v", err)
+	}
+	f := &LiveConvoyFetcher{townRoot: townRoot}
+	status, ok := f.managedSessionStatusForRow(SessionRow{Name: sessionName, Role: "witness", Rig: "gastown", Worker: "witness"})
+	if !ok {
+		t.Fatal("managedSessionStatusForRow() ok = false, want true")
+	}
+	if !status.Alive || status.Ready || status.Busy {
+		t.Fatalf("status = %#v, want alive=true ready=false busy=false", status)
 	}
 }
 
