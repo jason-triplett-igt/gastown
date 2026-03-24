@@ -416,6 +416,9 @@ Set `hooks_informational: true` in the preset. Gas Town will then send
 > executable lifecycle hooks (Pattern B equivalent, using its own JSON format).
 > See the built-in Copilot preset section above for current configuration.
 
+For investigating Copilot hook stdin payloads before adding new production hook
+logic, see `docs/design/copilot-hook-payload-probe.md`.
+
 ### How Gas Town chooses the fallback strategy
 
 The startup fallback matrix (from `internal/runtime/runtime.go`):
