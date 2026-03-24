@@ -478,6 +478,37 @@ func TestDeaconResumesStoredExternalBinding(t *testing.T) {
 	}
 }
 
+func TestDeaconInvalidRuntimeSessionIDFailsCleanly(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTownMarker(t, townRoot)
+	binding := runtime.SessionBinding{
+		IssueID:          SessionName(),
+		Role:             "deacon",
+		AgentName:        "deacon",
+		Provider:         "copilot-external",
+		SessionName:      SessionName(),
+		RuntimeSessionID: "runtime-bad",
+		WorkDir:          filepath.Join(townRoot, "deacon"),
+		Metadata:         map[string]string{"session_kind": "patrol"},
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{townRoot: townRoot, tmux: &mockTmux{}, adapter: &fakeRuntimeStarter{err: fmt.Errorf("invalid runtime session id")}}
+
+	info, err := m.Status()
+	if err == nil {
+		t.Fatal("Status() error = nil, want ErrNotRunning")
+	}
+	if !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("Status() error = %v, want ErrNotRunning", err)
+	}
+	if info != nil {
+		t.Fatalf("Status() = %#v, want nil", info)
+	}
+}
+
 func TestLifecycleStateReportsStoppingFromBinding(t *testing.T) {
 	townRoot := t.TempDir()
 	writeTownMarker(t, townRoot)

@@ -260,6 +260,37 @@ func TestRefineryResumesStoredExternalBinding(t *testing.T) {
 	}
 }
 
+func TestRefineryInvalidRuntimeSessionIDFailsCleanly(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	binding := runtime.SessionBinding{
+		IssueID:          mgr.SessionName(),
+		Role:             "refinery",
+		RigName:          "testrig",
+		AgentName:        "refinery",
+		Provider:         "copilot-external",
+		SessionName:      mgr.SessionName(),
+		RuntimeSessionID: "runtime-bad",
+		WorkDir:          filepath.Join(rigPath, "refinery", "rig"),
+		Metadata:         map[string]string{"session_kind": "patrol"},
+	}
+	store := runtime.NewFileSessionBindingStore(filepath.Dir(rigPath))
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	mgr.adapter = &fakeRuntimeStarter{err: fmt.Errorf("invalid runtime session id")}
+
+	info, err := mgr.Status()
+	if err == nil {
+		t.Fatal("Status() error = nil, want ErrNotRunning")
+	}
+	if err != ErrNotRunning {
+		t.Fatalf("Status() error = %v, want ErrNotRunning", err)
+	}
+	if info != nil {
+		t.Fatalf("Status() = %#v, want nil", info)
+	}
+}
+
 func TestManager_IsRunningUsesManagedRefineryBinding(t *testing.T) {
 	mgr, rigPath := setupTestManager(t)
 	binding := runtime.SessionBinding{

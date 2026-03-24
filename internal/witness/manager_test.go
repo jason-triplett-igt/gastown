@@ -648,6 +648,45 @@ func TestWitnessResumesStoredExternalBinding(t *testing.T) {
 	}
 }
 
+func TestWitnessInvalidRuntimeSessionIDFailsCleanly(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(`{"type":"town","version":2,"name":"slotmachine"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binding := runtime.SessionBinding{
+		IssueID:          "slotmachine-910",
+		Role:             "witness",
+		RigName:          "gastown",
+		AgentName:        "witness",
+		Provider:         "copilot-external",
+		SessionName:      sessionNameForTest("gastown"),
+		RuntimeSessionID: "runtime-bad",
+		WorkDir:          filepath.Join(rigPath, "witness"),
+		Metadata:         map[string]string{"session_kind": "patrol"},
+	}
+	store := runtime.NewFileSessionBindingStore(root)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{rig: &rig.Rig{Name: "gastown", Path: rigPath}, adapter: &fakeRuntimeStarter{err: fmt.Errorf("invalid runtime session id")}}
+
+	info, err := m.Status()
+	if err == nil {
+		t.Fatal("Status() error = nil, want ErrNotRunning")
+	}
+	if err != ErrNotRunning {
+		t.Fatalf("Status() error = %v, want ErrNotRunning", err)
+	}
+	if info != nil {
+		t.Fatalf("Status() = %#v, want nil", info)
+	}
+}
+
 func sessionNameForTest(rigName string) string {
 	return session.WitnessSessionName(session.PrefixFor(rigName))
 }
