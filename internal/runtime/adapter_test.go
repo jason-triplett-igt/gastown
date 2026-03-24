@@ -397,7 +397,16 @@ func TestTmuxSessionAdapterStartUsesExternalConnector(t *testing.T) {
 	if store.saved[0].Metadata["external_server"] != "true" || store.saved[0].Metadata["cli_url"] != "localhost:4321" {
 		t.Fatalf("binding metadata = %#v", store.saved[0].Metadata)
 	}
-	if recorder.lastPayload["metadata_external_server"] != "true" {
+	if len(recorder.events) == 0 || recorder.events[0] != TypeRuntimeSessionStart {
+		t.Fatalf("lifecycle events = %#v", recorder.events)
+	}
+	if recorder.lastPayload["session"] != "slotmachine-copilot-external" || recorder.lastPayload["runtime_session_id"] != "external-session-123" {
+		t.Fatalf("last payload = %#v", recorder.lastPayload)
+	}
+	if recorder.lastPayload["role"] != "crew" || recorder.lastPayload["issue"] != "slotmachine-910.5.7" || recorder.lastPayload["provider"] != "copilot-external" {
+		t.Fatalf("last payload = %#v", recorder.lastPayload)
+	}
+	if recorder.lastPayload["work_dir"] != workDir || recorder.lastPayload["metadata_external_server"] != "true" || recorder.lastPayload["metadata_cli_url"] != "localhost:4321" {
 		t.Fatalf("last payload = %#v", recorder.lastPayload)
 	}
 }
@@ -585,7 +594,16 @@ func TestExternalOwnerResumeReusesRuntimeSessionID(t *testing.T) {
 	if store.saved[0].RuntimeSessionID != "runtime-resume-7" {
 		t.Fatalf("RuntimeSessionID = %q, want runtime-resume-7", store.saved[0].RuntimeSessionID)
 	}
-	if recorder.lastPayload["runtime_session_id"] != "runtime-resume-7" {
+	if len(recorder.events) == 0 || recorder.events[0] != TypeRuntimeSessionResume {
+		t.Fatalf("lifecycle events = %#v", recorder.events)
+	}
+	if recorder.lastPayload["session"] != "gt-witness-review" || recorder.lastPayload["runtime_session_id"] != "runtime-resume-7" {
+		t.Fatalf("last payload = %#v", recorder.lastPayload)
+	}
+	if recorder.lastPayload["role"] != "witness" || recorder.lastPayload["issue"] != "slotmachine-910.2.1" || recorder.lastPayload["provider"] != "copilot-external" {
+		t.Fatalf("last payload = %#v", recorder.lastPayload)
+	}
+	if recorder.lastPayload["work_dir"] != workDir || recorder.lastPayload["metadata_external_server"] != "true" || recorder.lastPayload["metadata_cli_url"] != "https://copilot.example" {
 		t.Fatalf("last payload = %#v", recorder.lastPayload)
 	}
 	if controller.created {
@@ -647,7 +665,16 @@ func TestTmuxSessionAdapterResumeUsesExternalConnector(t *testing.T) {
 	if len(store.saved) != 1 || store.saved[0].RuntimeSessionID != "runtime-session-77" {
 		t.Fatalf("saved bindings = %#v", store.saved)
 	}
-	if recorder.lastPayload["metadata_cli_url"] != "localhost:4321" {
+	if len(recorder.events) == 0 || recorder.events[0] != TypeRuntimeSessionResume {
+		t.Fatalf("lifecycle events = %#v", recorder.events)
+	}
+	if recorder.lastPayload["session"] != "slotmachine-copilot-external-resume" || recorder.lastPayload["runtime_session_id"] != "runtime-session-77" {
+		t.Fatalf("last payload = %#v", recorder.lastPayload)
+	}
+	if recorder.lastPayload["role"] != "polecat" || recorder.lastPayload["issue"] != "slotmachine-910.5.7" || recorder.lastPayload["provider"] != "copilot-external" {
+		t.Fatalf("last payload = %#v", recorder.lastPayload)
+	}
+	if recorder.lastPayload["work_dir"] != workDir || recorder.lastPayload["metadata_cli_url"] != "localhost:4321" {
 		t.Fatalf("last payload = %#v", recorder.lastPayload)
 	}
 }
