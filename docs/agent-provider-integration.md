@@ -286,6 +286,10 @@ or Gemini CLI), Gas Town can install hooks automatically.
 | `PreToolUse` | Before tool execution | `gt tap guard pr-workflow` (guards PR creation) |
 | `Stop` | Session ends | `gt costs record` |
 
+When verifying mail side effects manually, prefer an explicit mailbox target such
+as `gt mail search --subject --identity mayor/` instead of relying on the
+current auto-detected sender identity.
+
 Reference template: `internal/claude/config/settings-autonomous.json`
 
 ```json

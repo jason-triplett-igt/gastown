@@ -452,6 +452,13 @@ Verified: clean"
 ```bash
 # Check inbox
 gt mail inbox
+gt mail inbox --identity mayor/
+
+# Check unread status for a specific inbox
+gt mail check --identity mayor/
+
+# Search a specific inbox explicitly
+gt mail search "MERGE_READY" --subject --identity mayor/
 
 # Read specific message
 gt mail read <msg-id>
@@ -479,6 +486,9 @@ New message types follow the pattern:
 
 The protocol is intentionally simple - structured enough for parsing,
 flexible enough for human debugging.
+
+Operational note: `gt mail search` defaults to the caller's current mailbox.
+Use `--identity <address>` when you need to search another inbox explicitly.
 
 ## Beads-Native Messaging
 

@@ -583,7 +583,10 @@ Agent overrides:
 
 ```bash
 gt mail inbox
+gt mail inbox --identity mayor/
 gt mail read <id>
+gt mail check --identity mayor/
+gt mail search "subject" --subject --identity mayor/
 gt mail send <addr> -s "Subject" -m "Body"
 gt mail send --human -s "..."    # To overseer
 ```
