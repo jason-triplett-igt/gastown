@@ -226,6 +226,47 @@ func TestExternalOwnerClaimedAndRemovedRequestsAreNotRequeued(t *testing.T) {
 	}
 }
 
+func TestExternalOwnerAskRequestTimesOutWithoutResponse(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	binding := &SessionBinding{SessionName: "hq-mayor", Metadata: OwnerBindingMetadata(ExternalOwnerDir(townRoot, "hq-mayor"), 1234)}
+	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
+	defer cancel()
+	request, err := enqueueExternalOwnerRequest(ctx, townRoot, binding, ExternalOwnerRequestKindAsk, "what now?")
+	if err != nil {
+		t.Fatalf("enqueueExternalOwnerRequest() error = %v", err)
+	}
+	resp, err := waitForExternalOwnerResponse(ctx, townRoot, binding, request.ID)
+	if err == nil {
+		t.Fatalf("waitForExternalOwnerResponse() = %#v, want context deadline exceeded", resp)
+	}
+	if !strings.Contains(err.Error(), context.DeadlineExceeded.Error()) {
+		t.Fatalf("waitForExternalOwnerResponse() error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestExternalOwnerAskRequestCancelledBeforeResponse(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	binding := &SessionBinding{SessionName: "hq-mayor", Metadata: OwnerBindingMetadata(ExternalOwnerDir(townRoot, "hq-mayor"), 1234)}
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := enqueueExternalOwnerRequest(ctx, townRoot, binding, ExternalOwnerRequestKindAsk, "what now?")
+	if err != nil {
+		t.Fatalf("enqueueExternalOwnerRequest() error = %v", err)
+	}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	resp, err := waitForExternalOwnerResponse(ctx, townRoot, binding, request.ID)
+	if err == nil {
+		t.Fatalf("waitForExternalOwnerResponse() = %#v, want context canceled", resp)
+	}
+	if !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("waitForExternalOwnerResponse() error = %v, want context canceled", err)
+	}
+}
+
 func TestDiscoverExternalOwnerFromPersistedBinding(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
