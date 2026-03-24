@@ -162,6 +162,70 @@ func TestExternalOwnerProcessesRequestsFIFO(t *testing.T) {
 	}
 }
 
+func TestExternalOwnerAskRequestReturnsStructuredError(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	binding := &SessionBinding{SessionName: "hq-mayor", Metadata: OwnerBindingMetadata(ExternalOwnerDir(townRoot, "hq-mayor"), 1234)}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	request, err := enqueueExternalOwnerRequest(ctx, townRoot, binding, ExternalOwnerRequestKindAsk, "what now?")
+	if err != nil {
+		t.Fatalf("enqueueExternalOwnerRequest() error = %v", err)
+	}
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		_ = WriteExternalOwnerResponse(townRoot, "hq-mayor", ExternalCopilotOwnerResponse{ID: request.ID, Error: "tool failed", CreatedAt: time.Now().UTC()})
+	}()
+	resp, err := waitForExternalOwnerResponse(ctx, townRoot, binding, request.ID)
+	if err != nil {
+		t.Fatalf("waitForExternalOwnerResponse() error = %v", err)
+	}
+	if resp.Error != "tool failed" {
+		t.Fatalf("Error = %q, want tool failed", resp.Error)
+	}
+	if resp.Content != "" {
+		t.Fatalf("Content = %q, want empty", resp.Content)
+	}
+}
+
+func TestExternalOwnerClaimedAndRemovedRequestsAreNotRequeued(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	binding := &SessionBinding{SessionName: "hq-mayor", Metadata: OwnerBindingMetadata(ExternalOwnerDir(townRoot, "hq-mayor"), 1234)}
+	_, err := enqueueExternalOwnerRequest(context.Background(), townRoot, binding, ExternalOwnerRequestKindSend, "first")
+	if err != nil {
+		t.Fatalf("enqueueExternalOwnerRequest() error = %v", err)
+	}
+	paths, err := NextExternalOwnerRequests(townRoot, "hq-mayor")
+	if err != nil {
+		t.Fatalf("NextExternalOwnerRequests() error = %v", err)
+	}
+	if len(paths) != 1 {
+		t.Fatalf("NextExternalOwnerRequests() len = %d, want 1", len(paths))
+	}
+	claimed, err := ClaimExternalOwnerRequest(paths[0])
+	if err != nil {
+		t.Fatalf("ClaimExternalOwnerRequest() error = %v", err)
+	}
+	remainder, err := NextExternalOwnerRequests(townRoot, "hq-mayor")
+	if err != nil {
+		t.Fatalf("NextExternalOwnerRequests() after claim error = %v", err)
+	}
+	if len(remainder) != 0 {
+		t.Fatalf("NextExternalOwnerRequests() after claim = %#v, want none", remainder)
+	}
+	if err := RemoveExternalOwnerRequest(claimed); err != nil {
+		t.Fatalf("RemoveExternalOwnerRequest() error = %v", err)
+	}
+	remainder, err = NextExternalOwnerRequests(townRoot, "hq-mayor")
+	if err != nil {
+		t.Fatalf("NextExternalOwnerRequests() after remove error = %v", err)
+	}
+	if len(remainder) != 0 {
+		t.Fatalf("NextExternalOwnerRequests() after remove = %#v, want none", remainder)
+	}
+}
+
 func TestDiscoverExternalOwnerFromPersistedBinding(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
