@@ -693,6 +693,34 @@ func TestSessionStartHookBuildsPrimeContext(t *testing.T) {
 	}
 }
 
+func TestPreToolHookDeniesBlockedTool(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	for _, target := range []string{"witness", "deacon", "refinery"} {
+		t.Run(target, func(t *testing.T) {
+			expected, err := ComputeExpected(target)
+			if err != nil {
+				t.Fatalf("ComputeExpected(%q) error = %v", target, err)
+			}
+			blocked := false
+			for _, entry := range expected.PreToolUse {
+				if !strings.Contains(entry.Matcher, "bd mol pour") {
+					continue
+				}
+				for _, hook := range entry.Hooks {
+					if strings.Contains(hook.Command, "BLOCKED: Patrol formulas must use wisps") && strings.Contains(hook.Command, "exit 2") {
+						blocked = true
+					}
+				}
+			}
+			if !blocked {
+				t.Fatalf("PreToolUse for %q does not contain blocking patrol-formula guard: %#v", target, expected.PreToolUse)
+			}
+		})
+	}
+}
+
 // TestComputeExpectedWitnessRigSpecific verifies patrol-formula-guard propagates
 // to rig-specific witness targets (e.g., sky/witness) via the witness role default.
 func TestComputeExpectedWitnessRigSpecific(t *testing.T) {
