@@ -67,3 +67,55 @@ func TestDeriveLifecycleState(t *testing.T) {
 		})
 	}
 }
+
+func TestRuntimeSessionPayloadFailsClosedToMinimalFields(t *testing.T) {
+	payload := RuntimeSessionPayload("gt-witness", "", "witness", "", "", map[string]interface{}{
+		"alive": true,
+		"ready": false,
+		"busy":  true,
+	})
+	if payload["session"] != "gt-witness" {
+		t.Fatalf("payload = %#v, want session", payload)
+	}
+	if payload["role"] != "witness" {
+		t.Fatalf("payload = %#v, want role", payload)
+	}
+	if _, ok := payload["runtime_session_id"]; ok {
+		t.Fatalf("payload = %#v, should omit empty runtime_session_id", payload)
+	}
+	if _, ok := payload["issue"]; ok {
+		t.Fatalf("payload = %#v, should omit empty issue", payload)
+	}
+	if _, ok := payload["provider"]; ok {
+		t.Fatalf("payload = %#v, should omit empty provider", payload)
+	}
+	if payload["alive"] != true || payload["ready"] != false || payload["busy"] != true {
+		t.Fatalf("payload = %#v, want lifecycle extras preserved", payload)
+	}
+}
+
+func TestDeriveLifecycleStateRunningWithoutLookupStaysStoppedWhenDead(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	binding := &SessionBinding{LifecycleState: SessionLifecycleRunning, UpdatedAt: now}
+	if got := DeriveLifecycleState(binding, false, nil); got != SessionLifecycleStopped {
+		t.Fatalf("DeriveLifecycleState() = %q, want %q", got, SessionLifecycleStopped)
+	}
+}
+
+func TestRuntimeSessionPayloadIncludesLatestStatusFields(t *testing.T) {
+	payload := RuntimeSessionPayload("slotmachine-run", "runtime-777", "polecat", "slotmachine-910", "copilot", map[string]interface{}{
+		"alive": true,
+		"ready": true,
+		"busy":  false,
+	})
+	if payload["session"] != "slotmachine-run" || payload["runtime_session_id"] != "runtime-777" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if payload["role"] != "polecat" || payload["issue"] != "slotmachine-910" || payload["provider"] != "copilot" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if payload["alive"] != true || payload["ready"] != true || payload["busy"] != false {
+		t.Fatalf("payload = %#v", payload)
+	}
+}

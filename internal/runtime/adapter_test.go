@@ -841,6 +841,15 @@ func TestTmuxManagedSessionStatusSendAndClose(t *testing.T) {
 	if len(recorder.events) == 0 || recorder.events[0] != TypeRuntimeSessionStatus {
 		t.Fatalf("lifecycle events = %#v", recorder.events)
 	}
+	if recorder.lastPayload["session"] != "slotmachine-run" || recorder.lastPayload["runtime_session_id"] != "runtime-777" {
+		t.Fatalf("lastPayload = %#v", recorder.lastPayload)
+	}
+	if recorder.lastPayload["alive"] != true || recorder.lastPayload["ready"] != true || recorder.lastPayload["busy"] != false {
+		t.Fatalf("lastPayload = %#v", recorder.lastPayload)
+	}
+	if recorder.lastPayload["role"] != "polecat" || recorder.lastPayload["issue"] != "slotmachine-910" || recorder.lastPayload["provider"] != "copilot" {
+		t.Fatalf("lastPayload = %#v", recorder.lastPayload)
+	}
 	if err := sess.Send(context.Background(), "hello"); err != nil {
 		t.Fatalf("Send() error = %v", err)
 	}
