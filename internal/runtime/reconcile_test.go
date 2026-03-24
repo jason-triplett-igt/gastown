@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func TestReconcileExternalOwnersClearsStaleOwnerBindings(t *testing.T) {
@@ -120,5 +121,57 @@ func TestReconcileExternalOwnersWithRecoverCallsRecoverForRigRoles(t *testing.T)
 	}
 	if result.AutoRecovered != 2 {
 		t.Fatalf("AutoRecovered = %d, want 2", result.AutoRecovered)
+	}
+}
+
+func TestReconcileExternalOwnersPreservesRuntimeSessionIDWhenClearingOwnerMetadata(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	store := NewFileSessionBindingStore(townRoot)
+	binding := SessionBinding{
+		IssueID:          "rig-witness",
+		Role:             "witness",
+		RigName:          "gastown",
+		AgentName:        "witness",
+		SessionName:      "gt-rig-gastown-witness",
+		RuntimeSessionID: "runtime-witness-123",
+		WorkDir:          townRoot + "/gastown",
+		Metadata:         OwnerBindingMetadata(ExternalOwnerDir(townRoot, "gt-rig-gastown-witness"), 999999),
+		LifecycleState:   SessionLifecycleRunning,
+	}
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if _, err := ReconcileExternalOwners(context.Background(), townRoot); err != nil {
+		t.Fatalf("ReconcileExternalOwners() error = %v", err)
+	}
+	updated, err := store.Load(context.Background(), binding.IssueID, binding.Role, binding.RigName, binding.AgentName)
+	if err != nil || updated == nil {
+		t.Fatalf("Load() updated = %v, %v", updated, err)
+	}
+	if updated.RuntimeSessionID != "runtime-witness-123" {
+		t.Fatalf("RuntimeSessionID = %q, want runtime-witness-123", updated.RuntimeSessionID)
+	}
+	if updated.LifecycleState != SessionLifecycleStopped {
+		t.Fatalf("LifecycleState = %q, want fail-closed stopped state", updated.LifecycleState)
+	}
+	if updated.Metadata[ExternalOwnerPIDMetadataKey] != "" {
+		t.Fatalf("Metadata = %#v, want cleared owner pid", updated.Metadata)
+	}
+	if IsExternalOwnerBinding(updated) {
+		t.Fatalf("binding still marked owner-managed: %#v", updated.Metadata)
+	}
+	if state := DeriveLifecycleState(updated, false, context.DeadlineExceeded); state != SessionLifecycleUnknown {
+		t.Fatalf("DeriveLifecycleState() = %q, want %q for errored stopped binding", state, SessionLifecycleUnknown)
+	}
+	runningBinding := *updated
+	runningBinding.LifecycleState = SessionLifecycleRunning
+	if state := DeriveLifecycleState(&runningBinding, false, context.DeadlineExceeded); state != SessionLifecycleUnknown {
+		t.Fatalf("DeriveLifecycleState() running binding with lookup error = %q, want %q", state, SessionLifecycleUnknown)
+	}
+	updated.UpdatedAt = time.Now().UTC().Add(-2 * SessionLifecycleStartingGrace)
+	updated.LifecycleState = SessionLifecycleStarting
+	if state := DeriveLifecycleState(updated, false, context.DeadlineExceeded); state != SessionLifecycleUnknown {
+		t.Fatalf("DeriveLifecycleState() stale starting = %q, want %q", state, SessionLifecycleUnknown)
 	}
 }
