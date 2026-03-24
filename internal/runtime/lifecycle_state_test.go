@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -117,5 +118,59 @@ func TestRuntimeSessionPayloadIncludesLatestStatusFields(t *testing.T) {
 	}
 	if payload["alive"] != true || payload["ready"] != true || payload["busy"] != false {
 		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func TestWorkerHealthReflectsLatestLifecycleState(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	tests := []struct {
+		name    string
+		binding *SessionBinding
+		alive   bool
+		err     error
+		want    string
+	}{
+		{
+			name:    "fresh starting remains starting",
+			binding: &SessionBinding{LifecycleState: SessionLifecycleStarting, UpdatedAt: now},
+			err:     context.DeadlineExceeded,
+			want:    SessionLifecycleStarting,
+		},
+		{
+			name:    "alive wins to running",
+			binding: &SessionBinding{LifecycleState: SessionLifecycleStarting, UpdatedAt: now},
+			alive:   true,
+			want:    SessionLifecycleRunning,
+		},
+		{
+			name:    "stopped recovered binding stays stopped without lookup error",
+			binding: &SessionBinding{LifecycleState: SessionLifecycleStopped, UpdatedAt: now},
+			alive:   false,
+			want:    SessionLifecycleStopped,
+		},
+		{
+			name:    "errored running binding becomes unknown",
+			binding: &SessionBinding{LifecycleState: SessionLifecycleRunning, UpdatedAt: now},
+			err:     context.DeadlineExceeded,
+			want:    SessionLifecycleUnknown,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := DeriveLifecycleState(tt.binding, tt.alive, tt.err); got != tt.want {
+				t.Fatalf("DeriveLifecycleState() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMalformedLifecycleEventFailsClosed(t *testing.T) {
+	payload := RuntimeSessionPayload("", "", "", "", "", nil)
+	if payload["session"] != "" || payload["role"] != "" {
+		t.Fatalf("payload = %#v, want minimal empty identifiers preserved", payload)
+	}
+	if len(payload) != 2 {
+		t.Fatalf("payload = %#v, want only session and role fields when optional data is absent", payload)
 	}
 }
