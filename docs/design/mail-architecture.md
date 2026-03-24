@@ -193,8 +193,9 @@ Results are sorted by priority first, then timestamp.
 
 `Mailbox.Search()` searches both inbox and archive content.
 
-Operational gotcha: `gt mail search` searches the current sender's mailbox. It
-does not accept an address positional argument like `gt mail inbox <address>`.
+Operational gotcha: `gt mail search` searches the current sender's mailbox by
+default. Use `--identity <address>` to search a different inbox. Unlike
+`gt mail inbox`, it does not accept a positional address argument.
 
 ### Read and delivery ack
 
@@ -256,6 +257,7 @@ Use these in order:
 2. Read the specific message by id when available:
    - `gt mail read <id>`
 3. Search from the correct identity context:
+   - `gt mail search "subject" --subject --identity mayor/`
    - `GT_ROLE=mayor gt mail search "subject" --subject`
 4. Check the feed log:
    - `.events.jsonl`

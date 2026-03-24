@@ -16,8 +16,8 @@ var (
 	mailType          string
 	mailReplyTo       string
 	mailNotify        bool
-	mailNoNotify      bool // Suppress auto-nudge notification to recipient
-	mailTo            string   // --to flag (alternative to positional arg)
+	mailNoNotify      bool   // Suppress auto-nudge notification to recipient
+	mailTo            string // --to flag (alternative to positional arg)
 	mailSendSelf      bool
 	mailCC            []string // CC recipients
 	mailInboxJSON     bool
@@ -34,11 +34,12 @@ var (
 	mailStdin         bool // Read message body from stdin
 
 	// Search flags
-	mailSearchFrom    string
-	mailSearchSubject bool
-	mailSearchBody    bool
-	mailSearchArchive bool
-	mailSearchJSON    bool
+	mailSearchIdentity string
+	mailSearchFrom     string
+	mailSearchSubject  bool
+	mailSearchBody     bool
+	mailSearchArchive  bool
+	mailSearchJSON     bool
 
 	// Announces flags
 	mailAnnouncesJSON bool
@@ -400,9 +401,14 @@ var mailSearchCmd = &cobra.Command{
 SYNTAX:
   gt mail search <query> [flags]
 
+By default, search is scoped to the current mailbox identity resolved from
+GT_ROLE or the current working directory. Use --identity to search a
+different inbox explicitly.
+
 The query is a regular expression pattern. Search is case-insensitive by default.
 
 FLAGS:
+  --identity <addr> Search a specific inbox instead of the auto-detected one
   --from <sender>   Filter by sender address (substring match)
   --subject         Only search subject lines
   --body            Only search message body
@@ -413,6 +419,7 @@ By default, searches both subject and body text.
 
 Examples:
   gt mail search "urgent"                    # Find messages with "urgent"
+  gt mail search "handoff" --identity mayor/ # Search mayor's inbox explicitly
   gt mail search "status.*check" --subject   # Regex in subjects only
   gt mail search "error" --from witness      # From witness, containing "error"
   gt mail search "handoff" --archive         # Include archived messages
@@ -499,6 +506,8 @@ func init() {
 	mailReplyCmd.Flags().StringVar(&mailReplyMessage, "body", "", "Reply message body (alias for --message)")
 
 	// Search flags
+	mailSearchCmd.Flags().StringVar(&mailSearchIdentity, "identity", "", "Explicit identity for inbox (e.g., greenplace/Toast)")
+	mailSearchCmd.Flags().StringVar(&mailSearchIdentity, "address", "", "Alias for --identity")
 	mailSearchCmd.Flags().StringVar(&mailSearchFrom, "from", "", "Filter by sender address")
 	mailSearchCmd.Flags().BoolVar(&mailSearchSubject, "subject", false, "Only search subject lines")
 	mailSearchCmd.Flags().BoolVar(&mailSearchBody, "body", false, "Only search message body")

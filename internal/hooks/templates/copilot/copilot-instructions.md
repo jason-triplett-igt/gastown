@@ -24,3 +24,12 @@ This loads your full role context, mail, and pending work.
 2. If work is hooked, execute immediately (no waiting for confirmation)
 3. If hook empty, check mail: `gt mail inbox`
 4. Complete work, commit, and push before ending session
+
+## Side Effects
+
+Do not claim a side effect succeeded until you verify it.
+
+- After `gt mail send`, verify with `gt mail search --subject --identity <recipient>`
+  or `gt mail inbox <recipient>`
+- After creating files, verify they exist and contain the expected content
+- After nudging, verify with queue or session evidence when possible

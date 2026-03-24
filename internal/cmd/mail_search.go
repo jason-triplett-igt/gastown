@@ -15,7 +15,7 @@ func runMailSearch(cmd *cobra.Command, args []string) error {
 	query := args[0]
 
 	// Determine which inbox to search
-	address := detectSender()
+	address := resolveMailSearchIdentity()
 
 	// Get workspace for mail operations
 	workDir, err := findMailWorkDir()
@@ -87,4 +87,11 @@ func runMailSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func resolveMailSearchIdentity() string {
+	if mailSearchIdentity != "" {
+		return mailSearchIdentity
+	}
+	return detectSender()
 }
