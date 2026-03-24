@@ -450,6 +450,149 @@ func TestTmuxSessionAdapterLookupUsesExternalConnector(t *testing.T) {
 	}
 }
 
+func TestExternalOwnerStartWritesStatusAndBinding(t *testing.T) {
+	controller := &fakeSessionController{sessions: make(map[string]bool), alive: make(map[string]bool)}
+	store := &fakeBindingStore{}
+	recorder := &fakeLifecycleRecorder{}
+	adapter := &TmuxSessionAdapter{tmux: controller, startupTimeout: time.Second, store: store, recorder: recorder}
+	workDir := t.TempDir()
+	townRoot := t.TempDir()
+	rigPath := t.TempDir()
+	settingsDir := filepath.Join(rigPath, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	settings := config.NewRigSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{"copilot-external": {
+		Provider: "copilot",
+		Command:  "copilot",
+		CLIURL:   "https://copilot.example",
+	}}
+	settings.RoleAgents = map[string]string{"mayor": "copilot-external"}
+	if err := config.SaveRigSettings(filepath.Join(settingsDir, "config.json"), settings); err != nil {
+		t.Fatalf("SaveRigSettings() error = %v", err)
+	}
+	oldLauncher := launchExternalOwnerProcess
+	t.Cleanup(func() { launchExternalOwnerProcess = oldLauncher })
+	launchExternalOwnerProcess = func(ctx context.Context, cfg ExternalCopilotOwnerConfig) (*ExternalCopilotOwnerStatus, error) {
+		_ = ctx
+		if cfg.StartupPrompt != "Investigate issue" {
+			t.Fatalf("StartupPrompt = %q, want Investigate issue", cfg.StartupPrompt)
+		}
+		status := &ExternalCopilotOwnerStatus{OwnerPID: 4321, RuntimeSessionID: "runtime-start-1", UpdatedAt: time.Now().UTC()}
+		if err := WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, *status); err != nil {
+			t.Fatalf("WriteExternalOwnerStatus() error = %v", err)
+		}
+		return status, nil
+	}
+
+	sess, err := adapter.Start(context.Background(), SessionLaunchRequest{
+		IssueID:     "hq-mayor",
+		SessionName: "hq-mayor",
+		Role:        "mayor",
+		WorkDir:     workDir,
+		TownRoot:    townRoot,
+		RigPath:     rigPath,
+		Prompt:      "Investigate issue",
+	})
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if sess.ID() != "runtime-start-1" {
+		t.Fatalf("session ID = %q, want runtime-start-1", sess.ID())
+	}
+	status, err := ReadExternalOwnerStatus(townRoot, "hq-mayor")
+	if err != nil {
+		t.Fatalf("ReadExternalOwnerStatus() error = %v", err)
+	}
+	if status.RuntimeSessionID != "runtime-start-1" || status.OwnerPID != 4321 {
+		t.Fatalf("status = %#v", status)
+	}
+	if len(store.saved) != 1 {
+		t.Fatalf("saved bindings = %#v", store.saved)
+	}
+	if store.saved[0].RuntimeSessionID != "runtime-start-1" {
+		t.Fatalf("RuntimeSessionID = %q, want runtime-start-1", store.saved[0].RuntimeSessionID)
+	}
+	if !IsExternalOwnerBinding(&store.saved[0]) {
+		t.Fatalf("binding metadata = %#v, want owner-managed binding", store.saved[0].Metadata)
+	}
+	if store.saved[0].Metadata[ExternalOwnerPIDMetadataKey] != "4321" {
+		t.Fatalf("owner pid metadata = %#v", store.saved[0].Metadata)
+	}
+	if recorder.lastPayload["metadata_owner_mode"] != ExternalOwnerModeQueue {
+		t.Fatalf("last payload = %#v", recorder.lastPayload)
+	}
+	if controller.created {
+		t.Fatal("tmux session should not be created for external owner start")
+	}
+}
+
+func TestExternalOwnerResumeReusesRuntimeSessionID(t *testing.T) {
+	controller := &fakeSessionController{sessions: make(map[string]bool), alive: make(map[string]bool)}
+	store := &fakeBindingStore{}
+	recorder := &fakeLifecycleRecorder{}
+	adapter := &TmuxSessionAdapter{tmux: controller, startupTimeout: time.Second, store: store, recorder: recorder}
+	workDir := t.TempDir()
+	townRoot := t.TempDir()
+	rigPath := t.TempDir()
+	settingsDir := filepath.Join(rigPath, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	settings := config.NewRigSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{"copilot-external": {
+		Provider: "copilot",
+		Command:  "copilot",
+		CLIURL:   "https://copilot.example",
+	}}
+	settings.RoleAgents = map[string]string{"witness": "copilot-external"}
+	if err := config.SaveRigSettings(filepath.Join(settingsDir, "config.json"), settings); err != nil {
+		t.Fatalf("SaveRigSettings() error = %v", err)
+	}
+	oldLauncher := launchExternalOwnerProcess
+	t.Cleanup(func() { launchExternalOwnerProcess = oldLauncher })
+	launchExternalOwnerProcess = func(ctx context.Context, cfg ExternalCopilotOwnerConfig) (*ExternalCopilotOwnerStatus, error) {
+		_ = ctx
+		if cfg.ResumeSessionID != "runtime-resume-7" {
+			t.Fatalf("ResumeSessionID = %q, want runtime-resume-7", cfg.ResumeSessionID)
+		}
+		status := &ExternalCopilotOwnerStatus{OwnerPID: 5432, RuntimeSessionID: "runtime-resume-7", UpdatedAt: time.Now().UTC()}
+		if err := WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, *status); err != nil {
+			t.Fatalf("WriteExternalOwnerStatus() error = %v", err)
+		}
+		return status, nil
+	}
+
+	sess, err := adapter.Resume(context.Background(), SessionResumeRequest{
+		IssueID:     "slotmachine-910.2.1",
+		SessionID:   "runtime-resume-7",
+		SessionName: "gt-witness-review",
+		Role:        "witness",
+		WorkDir:     workDir,
+		TownRoot:    townRoot,
+		RigPath:     rigPath,
+	})
+	if err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if sess.ID() != "runtime-resume-7" {
+		t.Fatalf("session ID = %q, want runtime-resume-7", sess.ID())
+	}
+	if len(store.saved) != 1 {
+		t.Fatalf("saved bindings = %#v", store.saved)
+	}
+	if store.saved[0].RuntimeSessionID != "runtime-resume-7" {
+		t.Fatalf("RuntimeSessionID = %q, want runtime-resume-7", store.saved[0].RuntimeSessionID)
+	}
+	if recorder.lastPayload["runtime_session_id"] != "runtime-resume-7" {
+		t.Fatalf("last payload = %#v", recorder.lastPayload)
+	}
+	if controller.created {
+		t.Fatal("tmux session should not be created for external owner resume")
+	}
+}
+
 func TestTmuxSessionAdapterResumeUsesExternalConnector(t *testing.T) {
 	t.Parallel()
 	controller := &fakeSessionController{sessions: make(map[string]bool), alive: make(map[string]bool)}

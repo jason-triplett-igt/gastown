@@ -21,6 +21,8 @@ type externalSessionConnector interface {
 
 type copilotExternalSessionConnector struct{}
 
+var launchExternalOwnerProcess = LaunchExternalOwnerProcess
+
 func (copilotExternalSessionConnector) Start(ctx context.Context, req SessionLaunchRequest, rc *config.RuntimeConfig, resolvedAgent string) (ManagedSession, error) {
 	if strings.Contains(strings.TrimSpace(rc.CLIURL), "127.0.0.1") || strings.Contains(strings.TrimSpace(rc.CLIURL), "localhost") {
 		if _, err := copilotutil.EnsureServer(ctx, req.TownRoot); err != nil {
@@ -28,7 +30,7 @@ func (copilotExternalSessionConnector) Start(ctx context.Context, req SessionLau
 		}
 	}
 	policy := resolveExternalToolPolicy(req.Role, req.TownRoot, req.RigPath, req.WorkDir, req.SessionKind, req.Metadata, req.ToolPolicy, req.AllowedTools, req.ReadOnly)
-	ownerStatus, err := LaunchExternalOwnerProcess(ctx, ExternalCopilotOwnerConfig{
+	ownerStatus, err := launchExternalOwnerProcess(ctx, ExternalCopilotOwnerConfig{
 		IssueID:          req.IssueID,
 		Role:             req.Role,
 		RigName:          req.RigName,
@@ -84,7 +86,7 @@ func (copilotExternalSessionConnector) Resume(ctx context.Context, req SessionRe
 	if strings.TrimSpace(req.SessionID) == "" {
 		return nil, fmt.Errorf("runtime session id is required for external resume")
 	}
-	status, err := LaunchExternalOwnerProcess(ctx, ExternalCopilotOwnerConfig{
+	status, err := launchExternalOwnerProcess(ctx, ExternalCopilotOwnerConfig{
 		IssueID:          req.IssueID,
 		Role:             req.Role,
 		RigName:          req.RigName,

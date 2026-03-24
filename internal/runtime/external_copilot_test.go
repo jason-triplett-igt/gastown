@@ -8,7 +8,7 @@ import (
 	"github.com/steveyegge/gastown/internal/toolapi"
 )
 
-func TestCopilotExternalLookupForOwnerManagedBinding(t *testing.T) {
+func TestExternalOwnerLookupForManagedBinding(t *testing.T) {
 	t.Parallel()
 	connector := copilotExternalSessionConnector{}
 	metadata := OwnerBindingMetadata("/tmp/gastown/.runtime/copilot-owner/hq-mayor", 4321)

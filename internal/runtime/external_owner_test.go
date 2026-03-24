@@ -121,6 +121,65 @@ func TestMarkExternalOwnerRecoveredClearsOwnerPid(t *testing.T) {
 	}
 }
 
+func TestExternalOwnerResetDoesNotLoseRuntimeBinding(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	store := NewFileSessionBindingStore(townRoot)
+	binding := SessionBinding{
+		IssueID:          "hq-mayor",
+		Role:             "mayor",
+		AgentName:        "mayor",
+		SessionName:      "hq-mayor",
+		RuntimeSessionID: "runtime-123",
+		WorkDir:          filepath.Join(townRoot, "mayor"),
+		Metadata:         OwnerBindingMetadata(ExternalOwnerDir(townRoot, "hq-mayor"), 1234),
+		LifecycleState:   SessionLifecycleRunning,
+	}
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if err := WriteExternalOwnerStatus(townRoot, "hq-mayor", ExternalCopilotOwnerStatus{OwnerPID: 1234, RuntimeSessionID: "runtime-123", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("WriteExternalOwnerStatus() error = %v", err)
+	}
+	if _, err := enqueueExternalOwnerRequest(context.Background(), townRoot, &binding, ExternalOwnerRequestKindAsk, "hello"); err != nil {
+		t.Fatalf("enqueueExternalOwnerRequest() error = %v", err)
+	}
+	if err := WriteExternalOwnerResponse(townRoot, "hq-mayor", ExternalCopilotOwnerResponse{ID: "done", Content: "DONE", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("WriteExternalOwnerResponse() error = %v", err)
+	}
+
+	if err := ResetExternalOwnerState(townRoot, "hq-mayor"); err != nil {
+		t.Fatalf("ResetExternalOwnerState() error = %v", err)
+	}
+	if _, err := ReadExternalOwnerStatus(townRoot, "hq-mayor"); err == nil {
+		t.Fatal("ReadExternalOwnerStatus() error = nil, want status removed")
+	}
+	requests, err := NextExternalOwnerRequests(townRoot, "hq-mayor")
+	if err != nil {
+		t.Fatalf("NextExternalOwnerRequests() error = %v", err)
+	}
+	if len(requests) != 0 {
+		t.Fatalf("requests = %#v, want none", requests)
+	}
+	entries, err := os.ReadDir(filepath.Join(ExternalOwnerDir(townRoot, "hq-mayor"), "responses"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadDir(responses) error = %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("response entries = %d, want 0", len(entries))
+	}
+	loaded, err := store.Load(context.Background(), binding.IssueID, binding.Role, binding.RigName, binding.AgentName)
+	if err != nil || loaded == nil {
+		t.Fatalf("Load() = %v, %v", loaded, err)
+	}
+	if loaded.RuntimeSessionID != "runtime-123" {
+		t.Fatalf("RuntimeSessionID = %q, want runtime-123", loaded.RuntimeSessionID)
+	}
+	if !IsExternalOwnerBinding(loaded) {
+		t.Fatalf("binding metadata = %#v, want owner-managed binding to remain persisted", loaded.Metadata)
+	}
+}
+
 func TestWaitForExternalOwnerResponseIgnoresIncompleteResponseFile(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
