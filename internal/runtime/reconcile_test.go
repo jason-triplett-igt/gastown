@@ -161,17 +161,17 @@ func TestReconcileExternalOwnersPreservesRuntimeSessionIDWhenClearingOwnerMetada
 	if IsExternalOwnerBinding(updated) {
 		t.Fatalf("binding still marked owner-managed: %#v", updated.Metadata)
 	}
-	if state := DeriveLifecycleState(updated, false, context.DeadlineExceeded); state != SessionLifecycleUnknown {
+	if state := DeriveLifecycleState(updated, false, false, context.DeadlineExceeded); state != SessionLifecycleUnknown {
 		t.Fatalf("DeriveLifecycleState() = %q, want %q for errored stopped binding", state, SessionLifecycleUnknown)
 	}
 	runningBinding := *updated
 	runningBinding.LifecycleState = SessionLifecycleRunning
-	if state := DeriveLifecycleState(&runningBinding, false, context.DeadlineExceeded); state != SessionLifecycleUnknown {
+	if state := DeriveLifecycleState(&runningBinding, false, false, context.DeadlineExceeded); state != SessionLifecycleUnknown {
 		t.Fatalf("DeriveLifecycleState() running binding with lookup error = %q, want %q", state, SessionLifecycleUnknown)
 	}
 	updated.UpdatedAt = time.Now().UTC().Add(-2 * SessionLifecycleStartingGrace)
 	updated.LifecycleState = SessionLifecycleStarting
-	if state := DeriveLifecycleState(updated, false, context.DeadlineExceeded); state != SessionLifecycleUnknown {
+	if state := DeriveLifecycleState(updated, false, false, context.DeadlineExceeded); state != SessionLifecycleUnknown {
 		t.Fatalf("DeriveLifecycleState() stale starting = %q, want %q", state, SessionLifecycleUnknown)
 	}
 }

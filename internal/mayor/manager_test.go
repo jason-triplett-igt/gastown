@@ -220,6 +220,34 @@ func TestMayorCombinedStatusUsesManagedBindingAsTmuxMode(t *testing.T) {
 	}
 }
 
+func TestMayorLifecycleStateDoesNotReportRunningWhenManagedSessionNotReady(t *testing.T) {
+	townRoot := t.TempDir()
+	binding := runtime.SessionBinding{
+		IssueID:          SessionName(),
+		Role:             "mayor",
+		AgentName:        "mayor",
+		Provider:         "copilot-external",
+		SessionName:      SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleRunning,
+		UpdatedAt:        time.Now().UTC(),
+		WorkDir:          filepath.Join(townRoot, "mayor"),
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{townRoot: townRoot, adapter: &fakeRuntimeAdapter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: false}}}}
+
+	state, err := m.LifecycleState()
+	if err != nil {
+		t.Fatalf("LifecycleState() error = %v", err)
+	}
+	if state != runtime.SessionLifecycleUnknown {
+		t.Fatalf("LifecycleState() = %q, want unknown", state)
+	}
+}
+
 func TestMayorStopUsesManagedBinding(t *testing.T) {
 	townRoot := t.TempDir()
 	managed := &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: true}}

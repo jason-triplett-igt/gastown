@@ -602,6 +602,35 @@ func TestLifecycleStateReportsUnknownForStaleBindingWithoutLookup(t *testing.T) 
 	}
 }
 
+func TestLifecycleStateDoesNotReportRunningWhenManagedSessionNotReady(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTownMarker(t, townRoot)
+	binding := runtime.SessionBinding{
+		IssueID:          SessionName(),
+		Role:             "deacon",
+		AgentName:        "deacon",
+		Provider:         "copilot-external",
+		SessionName:      SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleRunning,
+		UpdatedAt:        time.Now().UTC(),
+		WorkDir:          filepath.Join(townRoot, "deacon"),
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{townRoot: townRoot, tmux: &mockTmux{}, adapter: &fakeRuntimeStarter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: false}}}}
+
+	state, err := m.LifecycleState()
+	if err != nil {
+		t.Fatalf("LifecycleState() error = %v", err)
+	}
+	if state != runtime.SessionLifecycleUnknown {
+		t.Fatalf("LifecycleState() = %q, want unknown", state)
+	}
+}
+
 func TestStop_UsesManagedDeaconBinding(t *testing.T) {
 	townRoot := t.TempDir()
 	writeTownMarker(t, townRoot)

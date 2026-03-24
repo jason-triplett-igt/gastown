@@ -149,9 +149,9 @@ func (m *Manager) LifecycleState() (string, error) {
 	if bindErr == nil && binding != nil {
 		if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
 			status, statusErr := managed.Status(context.Background())
-			return runtime.DeriveLifecycleState(binding, status.Alive, statusErr), nil
+			return runtime.DeriveLifecycleState(binding, status.Alive, status.Ready, statusErr), nil
 		}
-		return runtime.DeriveLifecycleState(binding, false, fmt.Errorf("runtime status unavailable")), nil
+		return runtime.DeriveLifecycleState(binding, false, false, fmt.Errorf("runtime status unavailable")), nil
 	}
 	if running, err := m.tmux.HasSession(m.SessionName()); err == nil && running {
 		return runtime.SessionLifecycleRunning, nil

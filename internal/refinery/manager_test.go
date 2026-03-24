@@ -414,6 +414,35 @@ func TestManager_LifecycleStateReportsUnknownForStaleBindingWithoutLookup(t *tes
 	}
 }
 
+func TestManager_LifecycleStateDoesNotReportRunningWhenManagedSessionNotReady(t *testing.T) {
+	mgr, rigPath := setupTestManager(t)
+	binding := runtime.SessionBinding{
+		IssueID:          mgr.SessionName(),
+		Role:             "refinery",
+		RigName:          "testrig",
+		AgentName:        "refinery",
+		Provider:         "copilot-external",
+		SessionName:      mgr.SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleRunning,
+		UpdatedAt:        time.Now().UTC(),
+		WorkDir:          filepath.Join(rigPath, "refinery", "rig"),
+	}
+	store := runtime.NewFileSessionBindingStore(filepath.Dir(rigPath))
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	mgr.adapter = &fakeRuntimeStarter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: false}}}
+
+	state, err := mgr.LifecycleState()
+	if err != nil {
+		t.Fatalf("LifecycleState() error = %v", err)
+	}
+	if state != runtime.SessionLifecycleUnknown {
+		t.Fatalf("LifecycleState() = %q, want unknown", state)
+	}
+}
+
 func TestManager_StatusUsesManagedRefineryBinding(t *testing.T) {
 	mgr, rigPath := setupTestManager(t)
 	binding := runtime.SessionBinding{

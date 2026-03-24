@@ -468,6 +468,43 @@ func TestLifecycleStateReportsUnknownForStaleBindingWithoutLookup(t *testing.T) 
 	}
 }
 
+func TestLifecycleStateDoesNotReportRunningWhenManagedSessionNotReady(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(`{"type":"town","version":2,"name":"slotmachine"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binding := runtime.SessionBinding{
+		IssueID:          "slotmachine-910",
+		Role:             "witness",
+		RigName:          "gastown",
+		AgentName:        "witness",
+		Provider:         "copilot-external",
+		SessionName:      sessionNameForTest("gastown"),
+		RuntimeSessionID: "runtime-xyz",
+		LifecycleState:   runtime.SessionLifecycleRunning,
+		UpdatedAt:        time.Now().UTC(),
+		WorkDir:          filepath.Join(rigPath, "witness"),
+	}
+	store := runtime.NewFileSessionBindingStore(root)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{rig: &rig.Rig{Name: "gastown", Path: rigPath}, adapter: &fakeRuntimeStarter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: false}}}}
+
+	state, err := m.LifecycleState()
+	if err != nil {
+		t.Fatalf("LifecycleState() error = %v", err)
+	}
+	if state != runtime.SessionLifecycleUnknown {
+		t.Fatalf("LifecycleState() = %q, want unknown", state)
+	}
+}
+
 func TestStopUsesManagedWitnessBinding(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

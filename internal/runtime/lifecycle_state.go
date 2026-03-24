@@ -2,14 +2,20 @@ package runtime
 
 import "time"
 
-func DeriveLifecycleState(binding *SessionBinding, alive bool, statusErr error) string {
+func DeriveLifecycleState(binding *SessionBinding, alive, ready bool, statusErr error) string {
 	if binding != nil {
 		switch binding.LifecycleState {
 		case SessionLifecycleStopping:
 			return SessionLifecycleStopping
 		case SessionLifecycleStarting:
 			if alive {
-				return SessionLifecycleRunning
+				if ready {
+					return SessionLifecycleRunning
+				}
+				if recentlyUpdated(binding) {
+					return SessionLifecycleStarting
+				}
+				return SessionLifecycleUnknown
 			}
 			if statusErr != nil {
 				if recentlyUpdated(binding) {
@@ -31,6 +37,9 @@ func DeriveLifecycleState(binding *SessionBinding, alive bool, statusErr error) 
 		return SessionLifecycleStopped
 	}
 	if alive {
+		if !ready {
+			return SessionLifecycleUnknown
+		}
 		return SessionLifecycleRunning
 	}
 	return SessionLifecycleStopped

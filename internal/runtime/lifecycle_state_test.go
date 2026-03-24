@@ -15,6 +15,7 @@ func TestDeriveLifecycleState(t *testing.T) {
 		name    string
 		binding *SessionBinding
 		alive   bool
+		ready   bool
 		err     error
 		want    string
 	}{
@@ -22,6 +23,7 @@ func TestDeriveLifecycleState(t *testing.T) {
 			name:    "stopping wins",
 			binding: &SessionBinding{LifecycleState: SessionLifecycleStopping, UpdatedAt: now},
 			alive:   true,
+			ready:   true,
 			want:    SessionLifecycleStopping,
 		},
 		{
@@ -40,7 +42,22 @@ func TestDeriveLifecycleState(t *testing.T) {
 			name:    "alive becomes running",
 			binding: &SessionBinding{LifecycleState: SessionLifecycleStarting, UpdatedAt: now},
 			alive:   true,
+			ready:   true,
 			want:    SessionLifecycleRunning,
+		},
+		{
+			name:    "alive but not ready stays starting while fresh",
+			binding: &SessionBinding{LifecycleState: SessionLifecycleStarting, UpdatedAt: now},
+			alive:   true,
+			ready:   false,
+			want:    SessionLifecycleStarting,
+		},
+		{
+			name:    "alive but not ready becomes unknown when stale",
+			binding: &SessionBinding{LifecycleState: SessionLifecycleStarting, UpdatedAt: now.Add(-2 * SessionLifecycleStartingGrace)},
+			alive:   true,
+			ready:   false,
+			want:    SessionLifecycleUnknown,
 		},
 		{
 			name: "binding with lookup error becomes unknown",
@@ -62,7 +79,7 @@ func TestDeriveLifecycleState(t *testing.T) {
 		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := DeriveLifecycleState(tc.binding, tc.alive, tc.err); got != tc.want {
+			if got := DeriveLifecycleState(tc.binding, tc.alive, tc.ready, tc.err); got != tc.want {
 				t.Fatalf("DeriveLifecycleState() = %q, want %q", got, tc.want)
 			}
 		})
@@ -99,7 +116,7 @@ func TestDeriveLifecycleStateRunningWithoutLookupStaysStoppedWhenDead(t *testing
 	t.Parallel()
 	now := time.Now().UTC()
 	binding := &SessionBinding{LifecycleState: SessionLifecycleRunning, UpdatedAt: now}
-	if got := DeriveLifecycleState(binding, false, nil); got != SessionLifecycleStopped {
+	if got := DeriveLifecycleState(binding, false, false, nil); got != SessionLifecycleStopped {
 		t.Fatalf("DeriveLifecycleState() = %q, want %q", got, SessionLifecycleStopped)
 	}
 }
@@ -128,6 +145,7 @@ func TestWorkerHealthReflectsLatestLifecycleState(t *testing.T) {
 		name    string
 		binding *SessionBinding
 		alive   bool
+		ready   bool
 		err     error
 		want    string
 	}{
@@ -141,7 +159,15 @@ func TestWorkerHealthReflectsLatestLifecycleState(t *testing.T) {
 			name:    "alive wins to running",
 			binding: &SessionBinding{LifecycleState: SessionLifecycleStarting, UpdatedAt: now},
 			alive:   true,
+			ready:   true,
 			want:    SessionLifecycleRunning,
+		},
+		{
+			name:    "alive but not ready becomes unknown for running binding",
+			binding: &SessionBinding{LifecycleState: SessionLifecycleRunning, UpdatedAt: now},
+			alive:   true,
+			ready:   false,
+			want:    SessionLifecycleUnknown,
 		},
 		{
 			name:    "stopped recovered binding stays stopped without lookup error",
@@ -158,7 +184,7 @@ func TestWorkerHealthReflectsLatestLifecycleState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := DeriveLifecycleState(tt.binding, tt.alive, tt.err); got != tt.want {
+			if got := DeriveLifecycleState(tt.binding, tt.alive, tt.ready, tt.err); got != tt.want {
 				t.Fatalf("DeriveLifecycleState() = %q, want %q", got, tt.want)
 			}
 		})
