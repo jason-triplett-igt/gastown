@@ -167,3 +167,51 @@ func TestExternalCopilotManagedSessionStatusTracksOwnerBusyIdleTransitions(t *te
 		})
 	}
 }
+
+func TestExternalCopilotManagedSessionStatusReflectsUpdatedOwnerStatusOverTime(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	sessionName := "hq-mayor"
+	pid := os.Getpid()
+	sess := &externalCopilotManagedSession{
+		provider:    "copilot-external",
+		role:        "mayor",
+		sessionName: sessionName,
+		runtimeID:   "runtime-1",
+		townRoot:    townRoot,
+		metadata:    OwnerBindingMetadata(ExternalOwnerDir(townRoot, sessionName), pid),
+	}
+
+	if err := WriteExternalOwnerStatus(townRoot, sessionName, ExternalCopilotOwnerStatus{OwnerPID: pid, RuntimeSessionID: "runtime-1", Busy: false, UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("WriteExternalOwnerStatus(idle) error = %v", err)
+	}
+	status, err := sess.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status(idle) error = %v", err)
+	}
+	if status.Busy {
+		t.Fatalf("Status(idle) = %#v, want Busy=false", status)
+	}
+
+	if err := WriteExternalOwnerStatus(townRoot, sessionName, ExternalCopilotOwnerStatus{OwnerPID: pid, RuntimeSessionID: "runtime-1", Busy: true, UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("WriteExternalOwnerStatus(busy) error = %v", err)
+	}
+	status, err = sess.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status(busy) error = %v", err)
+	}
+	if !status.Busy {
+		t.Fatalf("Status(busy) = %#v, want Busy=true", status)
+	}
+
+	if err := WriteExternalOwnerStatus(townRoot, sessionName, ExternalCopilotOwnerStatus{OwnerPID: pid, RuntimeSessionID: "runtime-1", Busy: false, UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("WriteExternalOwnerStatus(idle-2) error = %v", err)
+	}
+	status, err = sess.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status(idle-2) error = %v", err)
+	}
+	if status.Busy {
+		t.Fatalf("Status(idle-2) = %#v, want Busy=false", status)
+	}
+}
