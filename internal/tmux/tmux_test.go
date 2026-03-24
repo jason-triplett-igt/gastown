@@ -1823,6 +1823,7 @@ func TestHasBusyIndicator(t *testing.T) {
 	}{
 		{"claude status busy", "⏵⏵ bypass permissions on ... · esc to interrupt", true},
 		{"codex status busy", "• Working (2m 18s • esc to interrupt)", true},
+		{"copilot status busy", "◎ Thinking (Esc to cancel)", true},
 		{"idle line", "› Review ready notification", false},
 		{"blank", "", false},
 	}

@@ -2,8 +2,10 @@ package toolcallbacks
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/copilotutil"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
@@ -13,14 +15,28 @@ import (
 func ForTown(townRoot, workDir string) toolapi.Callbacks {
 	return toolapi.Callbacks{
 		SendMail: func(from, to, subject, body, priority string) error {
+			if copilotutil.DebugOwnerToolsEnabled() {
+				fmt.Fprintf(os.Stderr, "[owner-tools] send_mail from=%s to=%s subject=%q priority=%s\n", strings.TrimSpace(from), strings.TrimSpace(to), strings.TrimSpace(subject), strings.TrimSpace(priority))
+			}
 			msg := mail.NewMessage(from, to, subject, body)
 			if strings.EqualFold(strings.TrimSpace(priority), "urgent") {
 				msg.Priority = mail.PriorityUrgent
 			}
-			return mail.NewRouterWithTownRoot(workDir, townRoot).Send(msg)
+			router := mail.NewRouterWithTownRoot(workDir, townRoot)
+			if err := router.Send(msg); err != nil {
+				if copilotutil.DebugOwnerToolsEnabled() {
+					fmt.Fprintf(os.Stderr, "[owner-tools] send_mail error=%v\n", err)
+				}
+				return err
+			}
+			router.WaitPendingNotifications()
+			return nil
 		},
 		ResolveSessionName: ResolveSessionName,
 		QueueNudge: func(sessionName, sender, message string) error {
+			if copilotutil.DebugOwnerToolsEnabled() {
+				fmt.Fprintf(os.Stderr, "[owner-tools] nudge_agent session=%s sender=%s message=%q\n", strings.TrimSpace(sessionName), strings.TrimSpace(sender), strings.TrimSpace(message))
+			}
 			return nudge.Enqueue(townRoot, sessionName, nudge.QueuedNudge{Sender: sender, Message: message, Priority: nudge.PriorityNormal})
 		},
 	}

@@ -861,6 +861,12 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 	// Workspace trust dialog is independent of bypass permissions and can appear
 	// for any agent, so we always check for non-interactive sessions.
 	if !opts.Interactive {
+		if err := t.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
+			// Non-fatal — agent might still start
+			style.PrintWarning("timeout waiting for agent to start: %v", err)
+		}
+		_ = t.AcceptStartupDialogs(sessionID)
+
 		agentName := opts.AgentOverride
 		if agentName == "" {
 			if rc := config.ResolveWorkerAgentConfig(name, townRoot, m.rig.Path); rc != nil && rc.Provider != "" {
@@ -870,13 +876,6 @@ func (m *Manager) Start(name string, opts StartOptions) error {
 			}
 		}
 		preset := config.GetAgentPresetByName(agentName)
-		if preset != nil && preset.EmitsPermissionWarning {
-			if err := t.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
-				// Non-fatal — agent might still start
-				style.PrintWarning("timeout waiting for agent to start: %v", err)
-			}
-			_ = t.AcceptStartupDialogs(sessionID)
-		}
 
 		// Start background nudge-queue poller for agents that lack turn-boundary
 		// drain hooks (e.g., Gemini, Codex). Claude drains its queue via

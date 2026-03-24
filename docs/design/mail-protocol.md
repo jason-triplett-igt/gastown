@@ -7,6 +7,9 @@
 Gas Town agents coordinate via mail messages routed through the beads system.
 Mail uses `type=message` beads with routing handled by `gt mail`.
 
+For storage, routing, inbox, delivery-ack, and notification mechanics, see
+`docs/design/mail-architecture.md`.
+
 ## Message Types
 
 ### POLECAT_DONE

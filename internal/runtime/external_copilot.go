@@ -8,10 +8,9 @@ import (
 
 	copilot "github.com/github/copilot-sdk/go"
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/copilotbridge"
 	"github.com/steveyegge/gastown/internal/copilotutil"
 	"github.com/steveyegge/gastown/internal/telemetry"
-	"github.com/steveyegge/gastown/internal/toolpolicy"
+	"github.com/steveyegge/gastown/internal/toolapi"
 )
 
 type externalSessionConnector interface {
@@ -23,104 +22,151 @@ type externalSessionConnector interface {
 type copilotExternalSessionConnector struct{}
 
 func (copilotExternalSessionConnector) Start(ctx context.Context, req SessionLaunchRequest, rc *config.RuntimeConfig, resolvedAgent string) (ManagedSession, error) {
-	client, err := newExternalCopilotClient(rc, req.WorkDir)
-	if err != nil {
-		return nil, err
+	if strings.Contains(strings.TrimSpace(rc.CLIURL), "127.0.0.1") || strings.Contains(strings.TrimSpace(rc.CLIURL), "localhost") {
+		if _, err := copilotutil.EnsureServer(ctx, req.TownRoot); err != nil {
+			return nil, err
+		}
 	}
 	policy := resolveExternalToolPolicy(req.Role, req.TownRoot, req.RigPath, req.WorkDir, req.SessionKind, req.Metadata, req.ToolPolicy, req.AllowedTools, req.ReadOnly)
-	tools, availableTools, excludedTools, err := copilotbridge.Tools(ctx, copilotbridge.SessionContext{Binding: copilotbridge.BindingInfo{IssueID: req.IssueID, Role: req.Role, RigName: req.RigName, AgentName: req.AgentName, WorkDir: req.WorkDir, Metadata: cloneStringMap(req.Metadata)}, TownRoot: req.TownRoot, RigPath: req.RigPath, WorkDir: req.WorkDir, Policy: policy, Hooks: req.ToolCallbacks})
-	if err != nil {
-		copilotutil.ForceStopClientQuietly(client)
-		return nil, fmt.Errorf("building external copilot tools: %w", err)
-	}
-	session, err := client.CreateSession(ctx, &copilot.SessionConfig{
-		OnPermissionRequest: toolpolicy.PermissionHandler(policy),
-		Tools:               tools,
-		AvailableTools:      append([]string(nil), availableTools...),
-		ExcludedTools:       append([]string(nil), excludedTools...),
-		WorkingDirectory:    req.WorkDir,
+	ownerStatus, err := LaunchExternalOwnerProcess(ctx, ExternalCopilotOwnerConfig{
+		IssueID:          req.IssueID,
+		Role:             req.Role,
+		RigName:          req.RigName,
+		RigPath:          req.RigPath,
+		AgentName:        req.AgentName,
+		Provider:         resolvedAgent,
+		SessionName:      req.SessionName,
+		SessionKind:      req.SessionKind,
+		TownRoot:         req.TownRoot,
+		WorkDir:          req.WorkDir,
+		RuntimeConfigDir: req.RuntimeConfigDir,
+		Metadata:         cloneStringMap(req.Metadata),
+		ToolPolicy:       cloneToolPolicy(policy),
+		StartupPrompt:    strings.TrimSpace(req.Prompt),
+		RequestedModel:   strings.TrimSpace(rc.Model),
+		ReasoningEffort:  strings.TrimSpace(rc.ReasoningEffort),
 	})
 	if err != nil {
-		copilotutil.ForceStopClientQuietly(client)
-		return nil, fmt.Errorf("creating external copilot session: %w", err)
+		return nil, fmt.Errorf("starting external owner session: %w", err)
 	}
-	return &externalCopilotManagedSession{
-		client:      client,
-		session:     session,
+	managed := &externalCopilotManagedSession{
 		provider:    resolvedAgent,
 		role:        req.Role,
 		issueID:     req.IssueID,
 		sessionName: req.SessionName,
-	}, nil
+		townRoot:    req.TownRoot,
+		workDir:     req.WorkDir,
+		rigPath:     req.RigPath,
+		rigName:     req.RigName,
+		agentName:   req.AgentName,
+		sessionKind: req.SessionKind,
+		metadata:    cloneStringMap(req.Metadata),
+		toolPolicy:  policy,
+		toolHooks:   req.ToolCallbacks,
+	}
+	managed.metadata = cloneStringMap(req.Metadata)
+	if managed.metadata == nil {
+		managed.metadata = make(map[string]string)
+	}
+	for key, value := range OwnerBindingMetadata(ExternalOwnerDir(req.TownRoot, req.SessionName), ownerStatus.OwnerPID) {
+		managed.metadata[key] = value
+	}
+	managed.runtimeID = ownerStatus.RuntimeSessionID
+	return managed, nil
 }
 
 func (copilotExternalSessionConnector) Resume(ctx context.Context, req SessionResumeRequest, rc *config.RuntimeConfig, resolvedAgent string) (ManagedSession, error) {
-	client, err := newExternalCopilotClient(rc, req.WorkDir)
-	if err != nil {
-		return nil, err
+	if strings.Contains(strings.TrimSpace(rc.CLIURL), "127.0.0.1") || strings.Contains(strings.TrimSpace(rc.CLIURL), "localhost") {
+		if _, err := copilotutil.EnsureServer(ctx, req.TownRoot); err != nil {
+			return nil, err
+		}
 	}
-	policy := resolveExternalToolPolicy(req.Role, req.TownRoot, req.RigPath, req.WorkDir, req.SessionKind, req.Metadata, req.ToolPolicy, req.AllowedTools, req.ReadOnly)
-	tools, availableTools, excludedTools, err := copilotbridge.Tools(ctx, copilotbridge.SessionContext{Binding: copilotbridge.BindingInfo{IssueID: req.IssueID, Role: req.Role, RigName: req.RigName, AgentName: req.AgentName, WorkDir: req.WorkDir, Metadata: cloneStringMap(req.Metadata)}, TownRoot: req.TownRoot, RigPath: req.RigPath, WorkDir: req.WorkDir, Policy: policy, Hooks: req.ToolCallbacks})
-	if err != nil {
-		copilotutil.ForceStopClientQuietly(client)
-		return nil, fmt.Errorf("building external copilot tools: %w", err)
+	if strings.TrimSpace(req.SessionID) == "" {
+		return nil, fmt.Errorf("runtime session id is required for external resume")
 	}
-	session, err := client.ResumeSession(ctx, req.SessionID, &copilot.ResumeSessionConfig{
-		OnPermissionRequest: toolpolicy.PermissionHandler(policy),
-		Tools:               tools,
-		AvailableTools:      append([]string(nil), availableTools...),
-		ExcludedTools:       append([]string(nil), excludedTools...),
-		WorkingDirectory:    req.WorkDir,
+	status, err := LaunchExternalOwnerProcess(ctx, ExternalCopilotOwnerConfig{
+		IssueID:          req.IssueID,
+		Role:             req.Role,
+		RigName:          req.RigName,
+		RigPath:          req.RigPath,
+		AgentName:        req.AgentName,
+		Provider:         resolvedAgent,
+		SessionName:      req.SessionName,
+		SessionKind:      req.SessionKind,
+		TownRoot:         req.TownRoot,
+		WorkDir:          req.WorkDir,
+		RuntimeConfigDir: req.RuntimeConfigDir,
+		Metadata:         cloneStringMap(req.Metadata),
+		ToolPolicy:       cloneToolPolicy(resolveExternalToolPolicy(req.Role, req.TownRoot, req.RigPath, req.WorkDir, req.SessionKind, req.Metadata, req.ToolPolicy, req.AllowedTools, req.ReadOnly)),
+		RequestedModel:   strings.TrimSpace(rc.Model),
+		ReasoningEffort:  strings.TrimSpace(rc.ReasoningEffort),
+		ResumeSessionID:  req.SessionID,
 	})
 	if err != nil {
-		copilotutil.ForceStopClientQuietly(client)
-		return nil, fmt.Errorf("resuming external copilot session: %w", err)
+		return nil, fmt.Errorf("resuming external owner session: %w", err)
+	}
+	metadata := cloneStringMap(req.Metadata)
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+	for key, value := range OwnerBindingMetadata(ExternalOwnerDir(req.TownRoot, req.SessionName), status.OwnerPID) {
+		metadata[key] = value
 	}
 	return &externalCopilotManagedSession{
-		client:      client,
-		session:     session,
 		provider:    resolvedAgent,
 		role:        req.Role,
 		issueID:     req.IssueID,
 		sessionName: req.SessionName,
-		runtimeID:   req.SessionID,
+		runtimeID:   status.RuntimeSessionID,
+		townRoot:    req.TownRoot,
+		workDir:     req.WorkDir,
+		rigPath:     req.RigPath,
+		rigName:     req.RigName,
+		agentName:   req.AgentName,
+		sessionKind: req.SessionKind,
+		metadata:    metadata,
+		toolPolicy:  resolveExternalToolPolicy(req.Role, req.TownRoot, req.RigPath, req.WorkDir, req.SessionKind, req.Metadata, req.ToolPolicy, req.AllowedTools, req.ReadOnly),
+		toolHooks:   req.ToolCallbacks,
 	}, nil
 }
 
 func (copilotExternalSessionConnector) Lookup(ctx context.Context, req SessionLookupRequest, rc *config.RuntimeConfig, resolvedAgent string) (ManagedSession, error) {
+	if IsExternalOwnerBinding(&SessionBinding{SessionName: req.SessionName, Metadata: req.Metadata}) {
+		return &externalCopilotManagedSession{
+			provider:    resolvedAgent,
+			role:        req.Role,
+			issueID:     req.IssueID,
+			sessionName: req.SessionName,
+			runtimeID:   req.SessionID,
+			townRoot:    req.TownRoot,
+			workDir:     req.WorkDir,
+			rigPath:     req.RigPath,
+			rigName:     req.RigName,
+			agentName:   req.AgentName,
+			sessionKind: req.SessionKind,
+			metadata:    cloneStringMap(req.Metadata),
+			toolPolicy:  resolveExternalToolPolicy(req.Role, req.TownRoot, req.RigPath, req.WorkDir, req.SessionKind, req.Metadata, req.ToolPolicy, req.AllowedTools, req.ReadOnly),
+			toolHooks:   req.ToolCallbacks,
+		}, nil
+	}
 	if strings.TrimSpace(req.SessionID) == "" {
 		return nil, fmt.Errorf("runtime session id is required for external lookup")
 	}
-	client, err := newExternalCopilotClient(rc, req.WorkDir)
-	if err != nil {
-		return nil, err
-	}
-	policy := resolveExternalToolPolicy(req.Role, req.TownRoot, req.RigPath, req.WorkDir, req.SessionKind, req.Metadata, req.ToolPolicy, req.AllowedTools, req.ReadOnly)
-	tools, availableTools, excludedTools, err := copilotbridge.Tools(ctx, copilotbridge.SessionContext{Binding: copilotbridge.BindingInfo{IssueID: req.IssueID, Role: req.Role, RigName: req.RigName, AgentName: req.AgentName, WorkDir: req.WorkDir, Metadata: cloneStringMap(req.Metadata)}, TownRoot: req.TownRoot, RigPath: req.RigPath, WorkDir: req.WorkDir, Policy: policy, Hooks: req.ToolCallbacks})
-	if err != nil {
-		copilotutil.ForceStopClientQuietly(client)
-		return nil, fmt.Errorf("building external copilot tools: %w", err)
-	}
-	session, err := client.ResumeSession(ctx, req.SessionID, &copilot.ResumeSessionConfig{
-		OnPermissionRequest: toolpolicy.PermissionHandler(policy),
-		Tools:               tools,
-		AvailableTools:      append([]string(nil), availableTools...),
-		ExcludedTools:       append([]string(nil), excludedTools...),
-		WorkingDirectory:    req.WorkDir,
-		DisableResume:       true,
-	})
-	if err != nil {
-		copilotutil.ForceStopClientQuietly(client)
-		return nil, fmt.Errorf("looking up external copilot session: %w", err)
-	}
 	return &externalCopilotManagedSession{
-		client:      client,
-		session:     session,
 		provider:    resolvedAgent,
 		role:        req.Role,
 		issueID:     req.IssueID,
 		sessionName: req.SessionName,
 		runtimeID:   req.SessionID,
+		townRoot:    req.TownRoot,
+		workDir:     req.WorkDir,
+		rigPath:     req.RigPath,
+		rigName:     req.RigName,
+		agentName:   req.AgentName,
+		sessionKind: req.SessionKind,
+		metadata:    cloneStringMap(req.Metadata),
+		toolPolicy:  resolveExternalToolPolicy(req.Role, req.TownRoot, req.RigPath, req.WorkDir, req.SessionKind, req.Metadata, req.ToolPolicy, req.AllowedTools, req.ReadOnly),
+		toolHooks:   req.ToolCallbacks,
 	}, nil
 }
 
@@ -147,6 +193,35 @@ func cloneToolPolicy(policy config.ToolPolicy) config.ToolPolicy {
 		cloned.ApprovalRules = append([]config.ApprovalRule(nil), policy.ApprovalRules...)
 	}
 	return cloned
+}
+
+func debugExternalTools(phase, role, sessionName string, availableTools, excludedTools []string) {
+	if !copilotutil.DebugCopilotToolsEnabled() {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[copilot-tools] phase=%s role=%s session=%s available=%s excluded=%s\n",
+		phase,
+		role,
+		sessionName,
+		strings.Join(availableTools, ","),
+		strings.Join(excludedTools, ","),
+	)
+}
+
+func debugExternalModel(ctx context.Context, session *copilot.Session, phase, role, sessionName, requestedModel, reasoningEffort string) {
+	if !copilotutil.DebugCopilotModelEnabled() || session == nil || session.RPC == nil || session.RPC.Model == nil {
+		return
+	}
+	info, err := session.RPC.Model.GetCurrent(ctx)
+	resolved := ""
+	if err == nil && info != nil && info.ModelID != nil {
+		resolved = strings.TrimSpace(*info.ModelID)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[copilot-model] phase=%s role=%s session=%s requested=%s effort=%s error=%v\n", phase, role, sessionName, requestedModel, reasoningEffort, err)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[copilot-model] phase=%s role=%s session=%s requested=%s effort=%s resolved=%s\n", phase, role, sessionName, requestedModel, reasoningEffort, resolved)
 }
 
 func newExternalCopilotClient(rc *config.RuntimeConfig, workDir string) (*copilot.Client, error) {
@@ -192,13 +267,20 @@ func copilotTelemetryConfig() *copilot.TelemetryConfig {
 }
 
 type externalCopilotManagedSession struct {
-	client      *copilot.Client
-	session     *copilot.Session
 	provider    string
 	role        string
 	issueID     string
 	sessionName string
 	runtimeID   string
+	townRoot    string
+	workDir     string
+	rigPath     string
+	rigName     string
+	agentName   string
+	sessionKind string
+	metadata    map[string]string
+	toolPolicy  config.ToolPolicy
+	toolHooks   toolapi.Callbacks
 	closed      bool
 }
 
@@ -206,13 +288,18 @@ func (s *externalCopilotManagedSession) ID() string {
 	if s.runtimeID != "" {
 		return s.runtimeID
 	}
-	if s.session == nil {
-		return ""
-	}
-	return s.session.SessionID
+	return ""
 }
 
 func (s *externalCopilotManagedSession) Status(_ context.Context) (SessionStatus, error) {
+	if IsExternalOwnerBinding(&SessionBinding{SessionName: s.sessionName, Metadata: s.metadata}) {
+		discovery, err := DiscoverExternalOwner(s.townRoot, &SessionBinding{SessionName: s.sessionName, RuntimeSessionID: s.runtimeID, Metadata: s.metadata, WorkDir: s.workDir, RigName: s.rigName})
+		if err != nil {
+			return SessionStatus{Provider: s.provider, SessionID: s.ID(), Ready: false, Alive: false, Busy: false}, err
+		}
+		alive := discovery.OwnerAlive && strings.TrimSpace(s.runtimeID) != ""
+		return SessionStatus{Provider: s.provider, SessionID: s.ID(), Ready: alive, Alive: alive, Busy: false}, nil
+	}
 	return SessionStatus{
 		Provider:  s.provider,
 		SessionID: s.ID(),
@@ -226,14 +313,13 @@ func (s *externalCopilotManagedSession) Send(ctx context.Context, message string
 	if strings.TrimSpace(message) == "" {
 		return nil
 	}
-	if s.session == nil {
-		return fmt.Errorf("external copilot session is not connected")
+	if IsExternalOwnerBinding(&SessionBinding{SessionName: s.sessionName, Metadata: s.metadata}) {
+		if err := SendExternalOwner(s.townRoot, &SessionBinding{SessionName: s.sessionName, Metadata: s.metadata}, message); err != nil {
+			return fmt.Errorf("queueing external owner send: %w", err)
+		}
+		return nil
 	}
-	_, err := s.session.Send(ctx, copilot.MessageOptions{Prompt: message})
-	if err != nil {
-		return fmt.Errorf("sending to external copilot session: %w", err)
-	}
-	return nil
+	return fmt.Errorf("external copilot session is not owner-managed")
 }
 
 func (s *externalCopilotManagedSession) Close(_ context.Context) error {
@@ -241,16 +327,16 @@ func (s *externalCopilotManagedSession) Close(_ context.Context) error {
 		return nil
 	}
 	s.closed = true
-	var result error
-	if s.session != nil {
-		if err := s.session.Disconnect(); err != nil {
-			result = fmt.Errorf("disconnecting external copilot session: %w", err)
+	if IsExternalOwnerBinding(&SessionBinding{SessionName: s.sessionName, Metadata: s.metadata}) {
+		if status, err := ReadExternalOwnerStatus(s.townRoot, s.sessionName); err == nil {
+			if status.OwnerPID > 0 {
+				if proc, findErr := os.FindProcess(status.OwnerPID); findErr == nil {
+					_ = proc.Kill()
+				}
+			}
 		}
+		_ = ResetExternalOwnerState(s.townRoot, s.sessionName)
+		return nil
 	}
-	if s.client != nil {
-		if err := copilotutil.StopClientQuietly(s.client); err != nil && result == nil {
-			result = fmt.Errorf("stopping external copilot client: %w", err)
-		}
-	}
-	return result
+	return nil
 }

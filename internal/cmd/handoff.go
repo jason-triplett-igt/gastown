@@ -1086,6 +1086,9 @@ func detectTownRootFromCwd() string {
 	// detached HEAD, wrong branch, deleted worktree, etc.
 	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
 		if envRoot := os.Getenv(envName); envRoot != "" {
+			if socket := os.Getenv("GT_TOWN_SOCKET"); socket != "" {
+				return envRoot
+			}
 			// Verify it's actually a workspace
 			if _, statErr := os.Stat(filepath.Join(envRoot, workspace.PrimaryMarker)); statErr == nil {
 				return envRoot
@@ -1093,6 +1096,19 @@ func detectTownRootFromCwd() string {
 			// Try secondary marker too
 			if info, statErr := os.Stat(filepath.Join(envRoot, workspace.SecondaryMarker)); statErr == nil && info.IsDir() {
 				return envRoot
+			}
+		}
+	}
+
+	// Fallback for commands run from inside a rig directory that itself contains a
+	// nested mayor/ marker: if GT_TOWN_ROOT/GT_ROOT is set to a parent workspace,
+	// prefer that outer workspace so town-socket routing and rig discovery work.
+	for _, envName := range []string{"GT_TOWN_ROOT", "GT_ROOT"} {
+		if envRoot := os.Getenv(envName); envRoot != "" {
+			if filepath.Clean(envRoot) != filepath.Clean(townRoot) {
+				if _, statErr := os.Stat(filepath.Join(envRoot, workspace.PrimaryMarker)); statErr == nil {
+					return envRoot
+				}
 			}
 		}
 	}

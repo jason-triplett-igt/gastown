@@ -82,6 +82,11 @@ func (a *TmuxSessionAdapter) Start(ctx context.Context, req SessionLaunchRequest
 			}
 		}
 		metadata := adapterBindingMetadata(req.Metadata, rc, req.SessionKind)
+		if externalManaged, ok := managedSession.(*externalCopilotManagedSession); ok {
+			for key, value := range externalManaged.metadata {
+				metadata[key] = value
+			}
+		}
 		if err := a.saveBinding(ctx, SessionBinding{
 			IssueID:          req.IssueID,
 			Role:             req.Role,

@@ -1215,7 +1215,6 @@ func nudgeFlockPath(townRoot, session string) string {
 	return filepath.Join(townRoot, constants.DirRuntime, "nudge_queue", safe, ".lock")
 }
 
-
 // IsSessionAttached returns true if the session has any clients attached.
 func (t *Tmux) IsSessionAttached(target string) bool {
 	attached, err := t.run("display-message", "-t", target, "-p", "#{session_attached}")
@@ -1376,9 +1375,9 @@ func (t *Tmux) dismissRewindMode(target string) {
 // Falls back to best-effort (no verification) if pane capture fails.
 func (t *Tmux) sendEnterVerified(target string) error {
 	const (
-		maxRetries       = 3
-		initialBackoff   = 500 * time.Millisecond
-		verifyLines      = 5 // capture last N lines for comparison
+		maxRetries     = 3
+		initialBackoff = 500 * time.Millisecond
+		verifyLines    = 5 // capture last N lines for comparison
 	)
 
 	// Snapshot pane content before Enter so we can detect processing.
@@ -1780,6 +1779,8 @@ func (t *Tmux) AcceptWorkspaceTrustDialog(session string) error {
 
 func containsWorkspaceTrustDialog(content string) bool {
 	return strings.Contains(content, "trust this folder") ||
+		strings.Contains(content, "Confirm folder trust") ||
+		strings.Contains(content, "Do you trust the files in this folder?") ||
 		strings.Contains(content, "Quick safety check") ||
 		strings.Contains(content, "Do you trust the contents of this directory?")
 }
@@ -2656,7 +2657,8 @@ func hasBusyIndicator(line string) bool {
 	if trimmed == "" {
 		return false
 	}
-	return strings.Contains(trimmed, "esc to interrupt")
+	lower := strings.ToLower(trimmed)
+	return strings.Contains(lower, "esc to interrupt") || strings.Contains(lower, "esc to cancel")
 }
 
 func readyPromptPrefixForSession(t *Tmux, session string) string {

@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/cli"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/telemetry"
@@ -116,6 +117,9 @@ func persistentPreRun(cmd *cobra.Command, args []string) error {
 	if townRoot := detectTownRootFromCwd(); townRoot != "" {
 		if err := session.InitRegistry(townRoot); err != nil {
 			fmt.Fprintf(os.Stderr, "WARNING: failed to initialize town registry: %v\n", err)
+		}
+		if _, err := runtime.ReconcileExternalOwnersWithRecover(context.Background(), townRoot, autoRecoverBinding); err != nil {
+			fmt.Fprintf(os.Stderr, "WARNING: failed to reconcile external owner state: %v\n", err)
 		}
 	}
 

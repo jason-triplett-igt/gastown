@@ -9,6 +9,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/crew"
+	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
@@ -145,6 +146,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 	if debug {
 		fmt.Printf("[DEBUG] hasSession=%v\n", hasSession)
 	}
+	startedRuntime := false
 
 	// Before creating a new session, check if there's already a runtime session
 	// running in this crew's directory (might have been started manually or via
@@ -255,6 +257,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 		if err := t.RespawnPane(paneID, startupCmd); err != nil {
 			return fmt.Errorf("starting runtime: %w", err)
 		}
+		startedRuntime = true
 
 		fmt.Printf("%s Created session for %s/%s\n",
 			style.Bold.Render("✓"), r.Name, name)
@@ -338,6 +341,24 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 					return runCrewAt(cmd, args) // Retry with fresh session
 				}
 				return fmt.Errorf("restarting runtime: %w", err)
+			}
+			startedRuntime = true
+		}
+	}
+
+	if startedRuntime {
+		if err := t.WaitForCommand(sessionID, constants.SupportedShells, constants.ClaudeStartTimeout); err != nil {
+			style.PrintWarning("timeout waiting for agent to start: %v", err)
+		}
+		_ = t.AcceptStartupDialogs(sessionID)
+
+		agentName := crewAgentOverride
+		if agentName == "" && runtimeConfig != nil && runtimeConfig.Provider != "" {
+			agentName = runtimeConfig.Provider
+		}
+		if preset := config.GetAgentPresetByName(agentName); preset != nil && !preset.HasTurnBoundaryDrain {
+			if _, pollerErr := nudge.StartPoller(townRoot, sessionID); pollerErr != nil {
+				style.PrintWarning("could not start nudge poller for %s: %v", name, pollerErr)
 			}
 		}
 	}

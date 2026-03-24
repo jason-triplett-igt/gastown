@@ -616,7 +616,14 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 				if managed == nil {
 					return fmt.Errorf("session %q not found", target)
 				}
-				if err := managed.Send(context.Background(), fmt.Sprintf("[from %s] %s", sender, message)); err != nil {
+				if binding, bindErr := runtime.NewFileSessionBindingStore(townRoot).Load(context.Background(), target, "", "", ""); bindErr == nil && runtime.IsExternalOwnerBinding(binding) {
+					if status, statusErr := runtime.ReadExternalOwnerStatus(townRoot, binding.SessionName); statusErr == nil && strings.TrimSpace(status.Error) != "" {
+						return fmt.Errorf("managed owner session unavailable: %s", strings.TrimSpace(status.Error))
+					}
+					if err := runtime.SendExternalOwner(townRoot, binding, fmt.Sprintf("[from %s] %s", sender, message)); err != nil {
+						return fmt.Errorf("nudging managed owner session: %w", err)
+					}
+				} else if err := managed.Send(context.Background(), fmt.Sprintf("[from %s] %s", sender, message)); err != nil {
 					return fmt.Errorf("nudging managed session: %w", err)
 				}
 				fmt.Printf("✓ Nudged %s (%s)\n", target, "managed")

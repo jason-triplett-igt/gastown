@@ -74,6 +74,13 @@ func runAsk(cmd *cobra.Command, args []string) error {
 	if cliURL == "" {
 		return fmt.Errorf("managed session for %s does not expose cli_url metadata", target)
 	}
+	if strings.Contains(cliURL, "127.0.0.1") || strings.Contains(cliURL, "localhost") {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if _, ensureErr := copilotutil.EnsureServer(ctx, townRoot); ensureErr != nil {
+			return ensureErr
+		}
+	}
 	if askUsesFreshSession(target) {
 		response, err := askFreshSession(binding, message, cliURL)
 		if err != nil {
@@ -86,6 +93,70 @@ func runAsk(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("no assistant reply received")
 		}
 		fmt.Println(strings.TrimSpace(*response.Data.Content))
+		return nil
+	}
+	if runtime.IsExternalOwnerBinding(binding) {
+		discovery, discoveryErr := runtime.DiscoverExternalOwner(bindingTownRoot(binding), binding)
+		if askDebug && discoveryErr == nil && discovery != nil {
+			fmt.Printf("[ask debug] owner alive=%t heartbeat=%t recoverable=%t reason=%s\n", discovery.OwnerAlive, discovery.HeartbeatLive, discovery.Recoverable, discovery.Reason)
+		}
+		if discoveryErr == nil && discovery != nil && !discovery.HeartbeatLive && strings.TrimSpace(binding.Metadata[runtime.ExternalOwnerPIDMetadataKey]) != "" {
+			_ = runtime.MarkExternalOwnerRecovered(context.Background(), runtime.NewFileSessionBindingStore(townRoot), binding)
+			binding, _ = runtime.NewFileSessionBindingStore(townRoot).Load(context.Background(), sessionName, "", "", "")
+			if binding != nil && askDebug {
+				fmt.Printf("[ask debug] owner metadata cleared after stale-owner recovery\n")
+			}
+		}
+		if discoveryErr == nil && discovery != nil && discovery.NeedsRecovery {
+			_ = runtime.MarkExternalOwnerRecovered(context.Background(), runtime.NewFileSessionBindingStore(townRoot), binding)
+			if restartErr := restartAskTarget(target, townRoot); restartErr != nil {
+				return fmt.Errorf("external owner unavailable: %s (restart failed: %v)", strings.TrimSpace(discovery.Reason), restartErr)
+			}
+			binding, err = runtime.NewFileSessionBindingStore(townRoot).Load(context.Background(), sessionName, "", "", "")
+			if err != nil {
+				return fmt.Errorf("reloading session binding after owner recovery: %w", err)
+			}
+			if binding == nil || strings.TrimSpace(binding.RuntimeSessionID) == "" {
+				return fmt.Errorf("external owner recovery restarted %s but no managed binding was found", target)
+			}
+			discovery, discoveryErr = runtime.DiscoverExternalOwner(bindingTownRoot(binding), binding)
+			if discoveryErr == nil && discovery != nil && !discovery.OwnerAlive {
+				return fmt.Errorf("external owner unavailable after restart: %s", strings.TrimSpace(discovery.Reason))
+			}
+		}
+		if discoveryErr == nil && discovery != nil && !discovery.OwnerAlive {
+			return fmt.Errorf("external owner unavailable: %s", strings.TrimSpace(discovery.Reason))
+		}
+		if status, err := runtime.ReadExternalOwnerStatus(bindingTownRoot(binding), binding.SessionName); err == nil && strings.TrimSpace(status.Error) != "" {
+			return fmt.Errorf("external owner unavailable: %s", strings.TrimSpace(status.Error))
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
+		defer cancel()
+		responseText, err := runtime.AskExternalOwner(ctx, bindingTownRoot(binding), binding, askTurnMessage(binding, message))
+		if err != nil {
+			if shouldRecoverAsk(err) {
+				_ = runtime.MarkExternalOwnerRecovered(context.Background(), runtime.NewFileSessionBindingStore(townRoot), binding)
+				if restartErr := restartAskTarget(target, townRoot); restartErr != nil {
+					return fmt.Errorf("waiting for owner-routed reply: %w (restart failed: %v)", err, restartErr)
+				}
+				binding, loadErr := runtime.NewFileSessionBindingStore(townRoot).Load(context.Background(), sessionName, "", "", "")
+				if loadErr != nil {
+					return fmt.Errorf("reloading session binding after owner restart: %w", loadErr)
+				}
+				if binding == nil || strings.TrimSpace(binding.RuntimeSessionID) == "" {
+					return fmt.Errorf("restarted %s but no managed session binding was found", target)
+				}
+				ctx, cancel = context.WithTimeout(context.Background(), askTimeout)
+				defer cancel()
+				responseText, err = runtime.AskExternalOwner(ctx, bindingTownRoot(binding), binding, askTurnMessage(binding, message))
+				if err == nil {
+					fmt.Println(strings.TrimSpace(responseText))
+					return nil
+				}
+			}
+			return fmt.Errorf("waiting for owner-routed reply: %w", err)
+		}
+		fmt.Println(strings.TrimSpace(responseText))
 		return nil
 	}
 	response, err := askManagedSession(binding, message, cliURL)
@@ -172,6 +243,8 @@ func askSystemMessage(binding *runtime.SessionBinding) *copilot.SystemMessageCon
 	}
 	content := "You are answering a direct operator question in a short-lived diagnostic session. " +
 		"Do not continue autonomous patrol behavior. Do not invent unavailable tools or helper commands. " +
+		"Use only the tools that are actually available in this session. " +
+		"Do not answer with intent, planning text, or future-tense promises before tool-backed work is complete. " +
 		"If shell or project-specific tools are unavailable, answer from the current session context and say what is unknown. " +
 		"Prefer a concise direct answer over planning or role bootstrapping."
 	if binding.Role == "witness" {
@@ -180,7 +253,34 @@ func askSystemMessage(binding *runtime.SessionBinding) *copilot.SystemMessageCon
 	if binding.Role == "refinery" {
 		content += " You are not being asked to resume refinery patrol. Answer directly from current context instead of attempting merge-queue automation."
 	}
+	if binding.Role == "mayor" || binding.Role == "deacon" {
+		content += " For delegation or coordination requests, perform the required tool actions first. Only reply after a tool result confirms success, or after a tool result confirms failure and you can state that failure directly. If notification is requested, use send_mail or nudge_agent rather than describing what you would do."
+	}
 	return &copilot.SystemMessageConfig{Mode: "append", Content: content}
+}
+
+func askTurnPrefix(binding *runtime.SessionBinding) string {
+	if binding == nil {
+		return ""
+	}
+	base := "Operator direct request for this turn only. Do not continue patrol or startup behavior. Do not answer with planning text or future-tense promises. Use only currently available tools."
+	switch binding.Role {
+	case "mayor", "deacon":
+		return base + " If delegation or notification is requested, perform the required send_mail or nudge_agent actions before replying. Reply only after a tool result confirms success or failure."
+	case "witness", "refinery":
+		return base + " Answer directly from current context instead of re-entering review or patrol workflows."
+	default:
+		return base
+	}
+}
+
+func askTurnMessage(binding *runtime.SessionBinding, message string) string {
+	message = strings.TrimSpace(message)
+	prefix := strings.TrimSpace(askTurnPrefix(binding))
+	if prefix == "" {
+		return message
+	}
+	return prefix + "\n\nOperator request:\n" + message
 }
 
 func printAskDiagnostics(binding *runtime.SessionBinding, cliURL string) {
@@ -281,29 +381,18 @@ func askManagedSession(binding *runtime.SessionBinding, message, cliURL string) 
 	defer cancel()
 	client := copilot.NewClient(&copilot.ClientOptions{CLIUrl: cliURL, Cwd: binding.WorkDir})
 	defer func() { _ = copilotutil.StopClientQuietly(client) }()
-	sessionKind := strings.TrimSpace(binding.Metadata["session_kind"])
-	if sessionKind == "" {
-		sessionKind = config.ToolSessionKindPatrol
-	}
-	policy := config.ResolveToolPolicyForSession(bindingTownRoot(binding), "", binding.Role, sessionKind, binding.WorkDir)
-	tools, availableTools, excludedTools, err := copilotbridge.Tools(ctx, copilotbridge.SessionContext{Binding: askBindingInfo(binding), TownRoot: bindingTownRoot(binding), WorkDir: binding.WorkDir, Policy: policy, Hooks: toolcallbacks.ForTown(bindingTownRoot(binding), binding.WorkDir)})
-	if err != nil {
-		return nil, fmt.Errorf("building managed ask tools: %w", err)
-	}
 	sess, err := client.ResumeSession(ctx, binding.RuntimeSessionID, &copilot.ResumeSessionConfig{
-		OnPermissionRequest: toolpolicy.PermissionHandler(policy),
-		Tools:               tools,
-		AvailableTools:      append([]string(nil), availableTools...),
-		ExcludedTools:       append([]string(nil), excludedTools...),
-		WorkingDirectory:    binding.WorkDir,
-		DisableResume:       true,
-		SystemMessage:       askSystemMessage(binding),
+		OnPermissionRequest: toolpolicy.PermissionHandler(config.ToolPolicy{
+			ApprovalRules: []config.ApprovalRule{{Action: "approve"}},
+		}),
+		WorkingDirectory: binding.WorkDir,
+		DisableResume:    true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("resuming managed session: %w", err)
 	}
 	defer sess.Disconnect()
-	response, err := sendAndWaitForReply(ctx, sess, message)
+	response, err := sendAndWaitForReply(ctx, sess, askTurnMessage(binding, message))
 	if err != nil {
 		return nil, fmt.Errorf("waiting for reply: %w", err)
 	}
@@ -315,6 +404,11 @@ func sendAndWaitForReply(ctx context.Context, sess *copilot.Session, message str
 	if existing, err := sess.GetMessages(ctx); err == nil {
 		baseCount = len(existing)
 	}
+	if existing, err := existingReply(sess, ctx, baseCount); err == nil && existing != nil {
+		return existing, nil
+	} else if err != nil {
+		return nil, err
+	}
 	if _, err := sess.Send(ctx, copilot.MessageOptions{Prompt: message}); err != nil {
 		return nil, err
 	}
@@ -322,12 +416,23 @@ func sendAndWaitForReply(ctx context.Context, sess *copilot.Session, message str
 	errCh := make(chan error, 1)
 	var lastAssistant *copilot.SessionEvent
 	var toolErr error
+	var sawUserMessage bool
 	unsubscribe := sess.On(func(event copilot.SessionEvent) {
 		switch event.Type {
+		case copilot.SessionEventTypeUserMessage:
+			if event.Data.Content != nil && strings.TrimSpace(*event.Data.Content) == strings.TrimSpace(message) {
+				sawUserMessage = true
+			}
 		case copilot.SessionEventTypeAssistantMessage:
+			if !sawUserMessage {
+				return
+			}
 			eventCopy := event
 			lastAssistant = &eventCopy
 		case copilot.SessionEventTypeToolExecutionComplete, copilot.SessionEventTypeExternalToolCompleted:
+			if !sawUserMessage {
+				return
+			}
 			if event.Data.Success != nil && !*event.Data.Success {
 				msg := "tool execution failed"
 				if event.Data.Error != nil && event.Data.Error.ErrorClass != nil {
@@ -336,6 +441,9 @@ func sendAndWaitForReply(ctx context.Context, sess *copilot.Session, message str
 				toolErr = fmt.Errorf("tool execution failed: %s", msg)
 			}
 		case copilot.SessionEventTypeAssistantTurnEnd, copilot.SessionEventTypeSessionIdle, copilot.SessionEventTypeSessionShutdown:
+			if !sawUserMessage {
+				return
+			}
 			if lastAssistant != nil {
 				select {
 				case result <- lastAssistant:
@@ -359,11 +467,6 @@ func sendAndWaitForReply(ctx context.Context, sess *copilot.Session, message str
 		}
 	})
 	defer unsubscribe()
-	if existing, err := existingReply(sess, ctx, baseCount); err == nil && existing != nil {
-		return existing, nil
-	} else if err != nil {
-		return nil, err
-	}
 	select {
 	case reply := <-result:
 		return reply, nil
@@ -391,15 +494,24 @@ func existingReply(sess *copilot.Session, ctx context.Context, baseCount int) (*
 		baseCount = len(messages)
 	}
 	var lastAssistant *copilot.SessionEvent
+	var sawUserMessage bool
 	for i := len(messages) - 1; i >= baseCount; i-- {
 		event := messages[i]
 		switch event.Type {
+		case copilot.SessionEventTypeUserMessage:
+			sawUserMessage = true
 		case copilot.SessionEventTypeAssistantMessage:
+			if !sawUserMessage {
+				continue
+			}
 			if lastAssistant == nil {
 				eventCopy := event
 				lastAssistant = &eventCopy
 			}
 		case copilot.SessionEventTypeToolExecutionComplete, copilot.SessionEventTypeExternalToolCompleted:
+			if !sawUserMessage {
+				continue
+			}
 			if event.Data.Success != nil && !*event.Data.Success {
 				if event.Data.Error != nil && event.Data.Error.ErrorClass != nil {
 					return nil, fmt.Errorf("tool execution failed: %s", event.Data.Error.ErrorClass.Message)
@@ -410,6 +522,9 @@ func existingReply(sess *copilot.Session, ctx context.Context, baseCount int) (*
 				return lastAssistant, nil
 			}
 		case copilot.SessionEventTypeAssistantTurnEnd, copilot.SessionEventTypeSessionIdle, copilot.SessionEventTypeSessionShutdown:
+			if !sawUserMessage {
+				continue
+			}
 			if lastAssistant != nil {
 				return lastAssistant, nil
 			}
@@ -429,6 +544,9 @@ func shouldRecoverAsk(err error) bool {
 	}
 	text := strings.ToLower(err.Error())
 	return strings.Contains(text, "session error") ||
+		strings.Contains(text, "session not found") ||
+		strings.Contains(text, "session.send failed") ||
+		strings.Contains(text, "owner ask failed") ||
 		strings.Contains(text, "400 bad request") ||
 		strings.Contains(text, "typeerror") ||
 		strings.Contains(text, "runtime is broken")

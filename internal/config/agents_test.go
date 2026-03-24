@@ -1055,9 +1055,12 @@ func TestCopilotAgentPreset(t *testing.T) {
 		t.Errorf("copilot ConfigDirEnv = %q, want COPILOT_HOME", info.ConfigDirEnv)
 	}
 
-	// GA: no detectable prompt prefix — uses delay-based readiness
-	if info.ReadyPromptPrefix != "" {
-		t.Errorf("copilot ReadyPromptPrefix = %q, want empty (GA has no ❯ prompt)", info.ReadyPromptPrefix)
+	if info.ReadyPromptPrefix != "❯ " {
+		t.Errorf("copilot ReadyPromptPrefix = %q, want \"❯ \"", info.ReadyPromptPrefix)
+	}
+
+	if !info.EscapeCancelsRequest {
+		t.Error("copilot should skip Escape during nudges to avoid canceling active work")
 	}
 
 	if info.NonInteractive == nil {
@@ -1170,8 +1173,8 @@ func TestCopilotProviderDefaults(t *testing.T) {
 	}
 
 	prefix := defaultReadyPromptPrefix("copilot")
-	if prefix != "" {
-		t.Errorf("defaultReadyPromptPrefix(copilot) = %q, want empty (GA has no ❯ prompt)", prefix)
+	if prefix != "❯ " {
+		t.Errorf("defaultReadyPromptPrefix(copilot) = %q, want \"❯ \"", prefix)
 	}
 
 	delay := defaultReadyDelayMs("copilot")
@@ -1477,12 +1480,12 @@ func TestACPModes(t *testing.T) {
 	t.Cleanup(ResetRegistryForTesting)
 
 	tests := []struct {
-		name      string
-		rc        *RuntimeConfig
-		wantACP   bool
-		wantMode  string
-		wantCmd   string
-		wantArgs  []string
+		name     string
+		rc       *RuntimeConfig
+		wantACP  bool
+		wantMode string
+		wantCmd  string
+		wantArgs []string
 	}{
 		{
 			name: "native mode - claude-agent-acp",

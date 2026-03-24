@@ -375,6 +375,7 @@ reference with examples and design rationale.
 ## See Also
 
 - [dolt-storage.md](dolt-storage.md) - Dolt storage architecture
+- [mail-architecture.md](mail-architecture.md) - Mail storage, routing, delivery, and notification flow
 - [reference.md](../reference.md) - Command reference
 - [directives-and-overlays.md](directives-and-overlays.md) - Directives and overlays reference
 - [molecules.md](../concepts/molecules.md) - Workflow molecules

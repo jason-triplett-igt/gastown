@@ -83,6 +83,7 @@ func TestShouldRecoverAsk(t *testing.T) {
 		want bool
 	}{
 		{name: "session error", err: errString("waiting for reply: session error: tool failed"), want: true},
+		{name: "owner session not found", err: errString("waiting for owner-routed reply: owner ask failed: failed to send message: JSON-RPC Error -32603: Request session.send failed with message: Session not found: abc"), want: true},
 		{name: "bad request", err: errString("CAPIError: 400 400 Bad Request"), want: true},
 		{name: "type error", err: errString("TypeError: Cannot read properties of undefined"), want: true},
 		{name: "ordinary timeout", err: errString("context deadline exceeded"), want: false},

@@ -1744,12 +1744,14 @@ func fillRuntimeDefaults(rc *RuntimeConfig) *RuntimeConfig {
 
 	// Create result with scalar fields (strings are immutable in Go)
 	result := &RuntimeConfig{
-		Provider:      rc.Provider,
-		CLIURL:        rc.CLIURL,
-		Command:       rc.Command,
-		InitialPrompt: rc.InitialPrompt,
-		PromptMode:    rc.PromptMode,
-		ResolvedAgent: rc.ResolvedAgent,
+		Provider:        rc.Provider,
+		Model:           rc.Model,
+		ReasoningEffort: rc.ReasoningEffort,
+		CLIURL:          rc.CLIURL,
+		Command:         rc.Command,
+		InitialPrompt:   rc.InitialPrompt,
+		PromptMode:      rc.PromptMode,
+		ResolvedAgent:   rc.ResolvedAgent,
 	}
 
 	// Deep copy Args slice to avoid sharing backing array

@@ -83,6 +83,28 @@ func TestAcceptWorkspaceTrustDialog_DetectsCodexDialog(t *testing.T) {
 	}
 }
 
+// TestAcceptWorkspaceTrustDialog_DetectsCopilotDialog verifies that Copilot's
+// folder-trust screen is treated as a trust dialog instead of a prompt.
+func TestAcceptWorkspaceTrustDialog_DetectsCopilotDialog(t *testing.T) {
+	tm := newTestTmux(t)
+	sessionName := "gt-test-trust-copilot-" + t.Name()
+
+	_ = tm.KillSession(sessionName)
+	if err := tm.NewSession(sessionName, ""); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	if err := tm.SendKeys(sessionName, "echo 'Confirm folder trust'; echo 'Do you trust the files in this folder?'; echo '❯ 1. Yes'"); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	if err := tm.AcceptWorkspaceTrustDialog(sessionName); err != nil {
+		t.Fatalf("AcceptWorkspaceTrustDialog: %v", err)
+	}
+}
+
 // TestAcceptBypassPermissionsWarning_NoDialog verifies that when no bypass
 // permissions dialog is present, the function returns quickly without error.
 func TestAcceptBypassPermissionsWarning_NoDialog(t *testing.T) {
@@ -209,6 +231,7 @@ func TestContainsWorkspaceTrustDialog(t *testing.T) {
 	}{
 		{"claude trust prompt", "Quick safety check\nDo you trust this folder?", true},
 		{"codex trust prompt", "> You are in /tmp/demo\nDo you trust the contents of this directory?", true},
+		{"copilot trust prompt", "Confirm folder trust\nDo you trust the files in this folder?\n❯ 1. Yes", true},
 		{"bypass dialog", "Bypass Permissions mode\n1. No\n2. Yes, I accept", false},
 		{"shell prompt", "user@host:~$", false},
 	}

@@ -159,9 +159,15 @@ func typedTool(sessionCtx SessionContext, name string) copilot.Tool {
 	case "send_mail":
 		return copilot.DefineTool("send_mail", toolDescription(name), func(params sendMailParams, inv copilot.ToolInvocation) (string, error) {
 			if sessionCtx.Hooks.SendMail == nil {
+				if sessionCtx.Hooks.ReportToolError != nil {
+					sessionCtx.Hooks.ReportToolError("send_mail is unavailable")
+				}
 				return "", fmt.Errorf("send_mail is unavailable")
 			}
 			if err := sessionCtx.Hooks.SendMail(actorIdentity(sessionCtx.Binding), strings.TrimSpace(params.To), strings.TrimSpace(params.Subject), strings.TrimSpace(params.Body), strings.TrimSpace(params.Priority)); err != nil {
+				if sessionCtx.Hooks.ReportToolError != nil {
+					sessionCtx.Hooks.ReportToolError(err.Error())
+				}
 				return "", err
 			}
 			return "sent", nil
@@ -169,13 +175,22 @@ func typedTool(sessionCtx SessionContext, name string) copilot.Tool {
 	case "nudge_agent":
 		return copilot.DefineTool("nudge_agent", toolDescription(name), func(params nudgeAgentParams, inv copilot.ToolInvocation) (string, error) {
 			if sessionCtx.Hooks.ResolveSessionName == nil || sessionCtx.Hooks.QueueNudge == nil {
+				if sessionCtx.Hooks.ReportToolError != nil {
+					sessionCtx.Hooks.ReportToolError("nudge_agent is unavailable")
+				}
 				return "", fmt.Errorf("nudge_agent is unavailable")
 			}
 			sessionName, err := sessionCtx.Hooks.ResolveSessionName(strings.TrimSpace(params.Target))
 			if err != nil {
+				if sessionCtx.Hooks.ReportToolError != nil {
+					sessionCtx.Hooks.ReportToolError(err.Error())
+				}
 				return "", err
 			}
 			if err := sessionCtx.Hooks.QueueNudge(sessionName, actorIdentity(sessionCtx.Binding), strings.TrimSpace(params.Message)); err != nil {
+				if sessionCtx.Hooks.ReportToolError != nil {
+					sessionCtx.Hooks.ReportToolError(err.Error())
+				}
 				return "", err
 			}
 			return "queued", nil

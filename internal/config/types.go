@@ -685,6 +685,14 @@ type RuntimeConfig struct {
 	// Known values: "claude", "codex", "generic". Default: "claude".
 	Provider string `json:"provider,omitempty"`
 
+	// Model selects the Copilot model identifier for external/runtime-backed sessions.
+	// Example: "gpt-4.1" or "claude-sonnet-4.5".
+	Model string `json:"model,omitempty"`
+
+	// ReasoningEffort requests the model's reasoning effort level when supported.
+	// Valid values: "low", "medium", "high", "xhigh".
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+
 	// CLIURL is the URL of an existing external runtime server to connect to.
 	// This is primarily used for Copilot CLI headless server mode.
 	CLIURL string `json:"cli_url,omitempty"`
