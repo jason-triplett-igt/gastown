@@ -573,4 +573,59 @@ func TestGetStartCommand_ClaudeAgentFallsThrough(t *testing.T) {
 	if startCmd == "exec claude --dangerously-skip-permissions" {
 		t.Errorf("getStartCommand returned literal TOML start_command verbatim — beacon injection was skipped: %q", startCmd)
 	}
+	for _, want := range []string{
+		"[GAS TOWN]",
+		"witness <- daemon",
+		"lifecycle-restart",
+		"Run `gt prime --hook` and begin work.",
+	} {
+		if !strings.Contains(startCmd, want) {
+			t.Errorf("getStartCommand() = %q, want substring %q", startCmd, want)
+		}
+	}
+	if strings.Contains(startCmd, "gastown/witness") {
+		t.Errorf("getStartCommand() should not use path-like witness address: %q", startCmd)
+	}
+}
+
+func TestGetStartCommand_LifecycleRestartUsesNonPathRecipientForCrew(t *testing.T) {
+	townRoot := t.TempDir()
+	settingsDir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(settingsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	townSettings := config.NewTownSettings()
+	settingsJSON, err := json.Marshal(townSettings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(settingsDir, "config.json"), settingsJSON, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	d := &Daemon{
+		config: &Config{TownRoot: townRoot},
+		logger: log.New(io.Discard, "", 0),
+	}
+
+	startCmd := d.getStartCommand(nil, &ParsedIdentity{RoleType: "crew", RigName: "gastown", AgentName: "max"})
+
+	for _, want := range []string{
+		"[GAS TOWN]",
+		"crew max (rig: gastown) <- daemon",
+		"lifecycle-restart",
+		"Run `gt prime --hook` and begin work.",
+	} {
+		if !strings.Contains(startCmd, want) {
+			t.Fatalf("getStartCommand() = %q, want substring %q", startCmd, want)
+		}
+	}
+	for _, notWant := range []string{"gastown/crew/max", "Run `gt prime` to initialize your context."} {
+		if strings.Contains(startCmd, notWant) {
+			t.Fatalf("getStartCommand() = %q, should not contain %q", startCmd, notWant)
+		}
+	}
 }
