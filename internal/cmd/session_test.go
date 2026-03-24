@@ -19,6 +19,8 @@ func TestSessionInfoJSONOutput(t *testing.T) {
 		Polecat:   "alpha",
 		SessionID: "gt-alpha",
 		Running:   true,
+		Ready:     true,
+		Busy:      false,
 		RigName:   "gastown",
 		Attached:  false,
 		Created:   time.Date(2026, 2, 20, 10, 0, 0, 0, time.UTC),
@@ -44,6 +46,12 @@ func TestSessionInfoJSONOutput(t *testing.T) {
 	if parsed["running"] != true {
 		t.Errorf("running = %v, want true", parsed["running"])
 	}
+	if parsed["ready"] != true {
+		t.Errorf("ready = %v, want true", parsed["ready"])
+	}
+	if parsed["busy"] != false {
+		t.Errorf("busy = %v, want false", parsed["busy"])
+	}
 	if parsed["rig_name"] != "gastown" {
 		t.Errorf("rig_name = %v, want gastown", parsed["rig_name"])
 	}
@@ -67,6 +75,8 @@ func TestSessionInfoJSONOutputNotRunning(t *testing.T) {
 		Polecat:   "beta",
 		SessionID: "gt-beta",
 		Running:   false,
+		Ready:     false,
+		Busy:      false,
 		RigName:   "testrig",
 	}
 
@@ -83,6 +93,12 @@ func TestSessionInfoJSONOutputNotRunning(t *testing.T) {
 	if parsed["running"] != false {
 		t.Errorf("running = %v, want false", parsed["running"])
 	}
+	if parsed["ready"] != false {
+		t.Errorf("ready = %v, want false", parsed["ready"])
+	}
+	if parsed["busy"] != false {
+		t.Errorf("busy = %v, want false", parsed["busy"])
+	}
 }
 
 func TestRunSessionStatusPrintsBindingObservability(t *testing.T) {
@@ -93,6 +109,20 @@ func TestRunSessionStatusPrintsBindingObservability(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(rigPath, "polecats", "toast"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsDir := filepath.Join(rigPath, "settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := config.NewRigSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{"copilot-external": {
+		Provider: "copilot",
+		Command:  "copilot",
+		CLIURL:   "localhost:4321",
+	}}
+	settings.RoleAgents = map[string]string{"polecat": "copilot-external"}
+	if err := config.SaveRigSettings(filepath.Join(settingsDir, "config.json"), settings); err != nil {
 		t.Fatal(err)
 	}
 	rigsConfig := &config.RigsConfig{

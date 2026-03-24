@@ -354,6 +354,8 @@ type SessionListItem struct {
 	Polecat   string `json:"polecat"`
 	SessionID string `json:"session_id"`
 	Running   bool   `json:"running"`
+	Ready     bool   `json:"ready"`
+	Busy      bool   `json:"busy"`
 }
 
 func runSessionList(cmd *cobra.Command, args []string) error {
@@ -406,6 +408,8 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 				Polecat:   info.Polecat,
 				SessionID: info.SessionID,
 				Running:   info.Running,
+				Ready:     info.Ready,
+				Busy:      info.Busy,
 			})
 		}
 	}
@@ -427,6 +431,8 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		status := style.Bold.Render("●")
 		if !s.Running {
 			status = style.Dim.Render("○")
+		} else if !s.Ready {
+			status = style.Warning.Render("◐")
 		}
 		fmt.Printf("  %s %s/%s\n", status, s.Rig, s.Polecat)
 		fmt.Printf("    %s\n", style.Dim.Render(s.SessionID))
@@ -583,12 +589,31 @@ func runSessionStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s Session: %s/%s\n\n", style.Bold.Render("📺"), rigName, polecatName)
 
 	if info.Running {
-		fmt.Printf("  State: %s\n", style.Bold.Render("● running"))
+		if info.Ready {
+			fmt.Printf("  State: %s\n", style.Bold.Render("● running"))
+		} else {
+			fmt.Printf("  State: %s\n", style.Warning.Render("◐ degraded"))
+		}
 	} else {
 		fmt.Printf("  State: %s\n", style.Dim.Render("○ stopped"))
 	}
 
 	fmt.Printf("  Session ID: %s\n", info.SessionID)
+	if info.Running {
+		if info.Ready {
+			fmt.Printf("  Ready: yes\n")
+		} else {
+			fmt.Printf("  Ready: no\n")
+		}
+		if info.Busy {
+			fmt.Printf("  Busy: yes\n")
+		} else {
+			fmt.Printf("  Busy: no\n")
+		}
+		if strings.TrimSpace(info.StatusError) != "" {
+			fmt.Printf("  Status Error: %s\n", info.StatusError)
+		}
+	}
 
 	if info.Running {
 		if info.Attached {

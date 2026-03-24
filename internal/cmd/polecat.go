@@ -642,6 +642,9 @@ type PolecatStatus struct {
 	ClonePath      string        `json:"clone_path"`
 	Branch         string        `json:"branch"`
 	SessionRunning bool          `json:"session_running"`
+	SessionReady   bool          `json:"session_ready"`
+	SessionBusy    bool          `json:"session_busy"`
+	StatusError    string        `json:"status_error,omitempty"`
 	SessionID      string        `json:"session_id,omitempty"`
 	Attached       bool          `json:"attached,omitempty"`
 	Windows        int           `json:"windows,omitempty"`
@@ -688,6 +691,9 @@ func runPolecatStatus(cmd *cobra.Command, args []string) error {
 			ClonePath:      p.ClonePath,
 			Branch:         p.Branch,
 			SessionRunning: sessInfo.Running,
+			SessionReady:   sessInfo.Ready,
+			SessionBusy:    sessInfo.Busy,
+			StatusError:    sessInfo.StatusError,
 			SessionID:      sessInfo.SessionID,
 			Attached:       sessInfo.Attached,
 			Windows:        sessInfo.Windows,
@@ -736,8 +742,17 @@ func runPolecatStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("%s\n", style.Bold.Render("Session"))
 
 	if sessInfo.Running {
-		fmt.Printf("  Status:        %s\n", style.Success.Render("running"))
+		if sessInfo.Ready {
+			fmt.Printf("  Status:        %s\n", style.Success.Render("running"))
+		} else {
+			fmt.Printf("  Status:        %s\n", style.Warning.Render("degraded"))
+		}
 		fmt.Printf("  Session ID:    %s\n", style.Dim.Render(sessInfo.SessionID))
+		fmt.Printf("  Ready:         %s\n", map[bool]string{true: style.Info.Render("yes"), false: style.Warning.Render("no")}[sessInfo.Ready])
+		fmt.Printf("  Busy:          %s\n", map[bool]string{true: style.Info.Render("yes"), false: style.Dim.Render("no")}[sessInfo.Busy])
+		if strings.TrimSpace(sessInfo.StatusError) != "" {
+			fmt.Printf("  Status Error:  %s\n", style.Warning.Render(sessInfo.StatusError))
+		}
 
 		if sessInfo.Attached {
 			fmt.Printf("  Attached:      %s\n", style.Info.Render("yes"))

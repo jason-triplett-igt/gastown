@@ -943,6 +943,69 @@ func TestRuntimeStatusForIssueUsesBinding(t *testing.T) {
 	}
 }
 
+func TestStatusUsesManagedBindingReadyAndBusyFields(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "gastown", Path: t.TempDir()}
+	adapter := &fakeSessionAdapter{resumeSession: &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: false, Busy: true}, err: fmt.Errorf("owner degraded")}}
+	m := &SessionManager{
+		tmux:    tmux.NewTmux(),
+		rig:     r,
+		adapter: adapter,
+		bindings: &fakeBindingStore{binding: &runtimepkg.SessionBinding{
+			IssueID:          "slotmachine-910",
+			Role:             "polecat",
+			RigName:          "gastown",
+			AgentName:        "toast",
+			Provider:         "claude",
+			SessionName:      "missing-session",
+			RuntimeSessionID: "runtime-123",
+		}},
+	}
+	info, err := m.Status("toast")
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if !info.Running || info.Ready || !info.Busy {
+		t.Fatalf("info = %#v, want running=true ready=false busy=true", info)
+	}
+	if info.StatusError != "owner degraded" {
+		t.Fatalf("StatusError = %q, want owner degraded", info.StatusError)
+	}
+}
+
+func TestListIncludesManagedReadyAwareStatus(t *testing.T) {
+	t.Parallel()
+	r := &rig.Rig{Name: "gastown", Path: t.TempDir()}
+	adapter := &fakeSessionAdapter{resumeSession: &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: false, Busy: true}, err: fmt.Errorf("owner degraded")}}
+	binding := &runtimepkg.SessionBinding{
+		Role:             "polecat",
+		RigName:          "gastown",
+		AgentName:        "toast",
+		Provider:         "copilot-external",
+		SessionName:      "gt-toast",
+		RuntimeSessionID: "runtime-123",
+	}
+	m := &SessionManager{
+		tmux:     tmux.NewTmux(),
+		rig:      r,
+		adapter:  adapter,
+		bindings: &fakeBindingStore{binding: binding, list: []runtimepkg.SessionBinding{*binding}},
+	}
+	infos, err := m.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("infos = %#v, want one entry", infos)
+	}
+	if !infos[0].Running || infos[0].Ready || !infos[0].Busy {
+		t.Fatalf("infos[0] = %#v, want running=true ready=false busy=true", infos[0])
+	}
+	if infos[0].StatusError != "owner degraded" {
+		t.Fatalf("StatusError = %q, want owner degraded", infos[0].StatusError)
+	}
+}
+
 func TestBindingForPolecatReturnsBinding(t *testing.T) {
 	t.Parallel()
 	r := &rig.Rig{Name: "gastown", Path: t.TempDir()}

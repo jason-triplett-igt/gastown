@@ -106,6 +106,15 @@ type SessionInfo struct {
 	// Running indicates if the session is currently active.
 	Running bool `json:"running"`
 
+	// Ready indicates if the runtime is ready to accept work.
+	Ready bool `json:"ready"`
+
+	// Busy indicates if the runtime is actively processing work.
+	Busy bool `json:"busy"`
+
+	// StatusError is the latest managed-runtime status error, if any.
+	StatusError string `json:"status_error,omitempty"`
+
 	// RigName is the rig this session belongs to.
 	RigName string `json:"rig_name"`
 
@@ -974,13 +983,8 @@ func (m *SessionManager) Status(polecat string) (*SessionInfo, error) {
 	if binding != nil && binding.RuntimeSessionID != "" {
 		if managed, _, lookupErr := m.lookupManagedPolecatSession(polecat); lookupErr == nil && managed != nil {
 			status, statusErr := managed.Status(context.Background())
-			if statusErr == nil {
-				return &SessionInfo{
-					Polecat:   polecat,
-					SessionID: sessionID,
-					Running:   status.Alive,
-					RigName:   m.rig.Name,
-				}, nil
+			if info, ok := managedSessionInfo(polecat, sessionID, m.rig.Name, status, statusErr); ok {
+				return info, nil
 			}
 		}
 	}
@@ -1075,15 +1079,11 @@ func (m *SessionManager) List() ([]SessionInfo, error) {
 				continue
 			}
 			status, statusErr := managed.Status(context.Background())
-			if statusErr != nil || !status.Alive {
+			info, ok := managedSessionInfo(binding.AgentName, binding.SessionName, m.rig.Name, status, statusErr)
+			if !ok || !info.Running {
 				continue
 			}
-			infosByPolecat[binding.AgentName] = SessionInfo{
-				Polecat:   binding.AgentName,
-				SessionID: binding.SessionName,
-				Running:   true,
-				RigName:   m.rig.Name,
-			}
+			infosByPolecat[binding.AgentName] = *info
 		}
 	}
 
@@ -1095,6 +1095,24 @@ func (m *SessionManager) List() ([]SessionInfo, error) {
 		return strings.ToLower(infos[i].Polecat) < strings.ToLower(infos[j].Polecat)
 	})
 	return infos, nil
+}
+
+func managedSessionInfo(polecat, sessionID, rigName string, status runtime.SessionStatus, statusErr error) (*SessionInfo, bool) {
+	if statusErr != nil && strings.TrimSpace(status.SessionID) == "" && !status.Alive && !status.Ready && !status.Busy {
+		return nil, false
+	}
+	info := &SessionInfo{
+		Polecat:   polecat,
+		SessionID: sessionID,
+		Running:   status.Alive,
+		Ready:     status.Ready,
+		Busy:      status.Busy,
+		RigName:   rigName,
+	}
+	if statusErr != nil {
+		info.StatusError = strings.TrimSpace(statusErr.Error())
+	}
+	return info, true
 }
 
 // ListPolecats returns information only about polecat sessions for this rig.
