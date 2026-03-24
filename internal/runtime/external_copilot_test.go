@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -238,5 +239,58 @@ func TestExternalCopilotManagedSessionStatusFailsClosedForDeadOwnerBusyBit(t *te
 	}
 	if status.Alive || status.Ready || status.Busy {
 		t.Fatalf("status = %#v, want alive=false ready=false busy=false", status)
+	}
+}
+
+func TestExternalCopilotManagedSessionStatusFailsClosedWhenHeartbeatStale(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	sessionName := "hq-mayor"
+	pid := os.Getpid()
+	if err := WriteExternalOwnerStatus(townRoot, sessionName, ExternalCopilotOwnerStatus{OwnerPID: pid, RuntimeSessionID: "runtime-1", Busy: true, UpdatedAt: time.Now().UTC().Add(-ExternalOwnerHeartbeatWindow * 2)}); err != nil {
+		t.Fatalf("WriteExternalOwnerStatus() error = %v", err)
+	}
+	sess := &externalCopilotManagedSession{
+		provider:    "copilot-external",
+		role:        "mayor",
+		sessionName: sessionName,
+		runtimeID:   "runtime-1",
+		townRoot:    townRoot,
+		metadata:    OwnerBindingMetadata(ExternalOwnerDir(townRoot, sessionName), pid),
+	}
+	status, err := sess.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if !status.Alive || status.Ready || status.Busy {
+		t.Fatalf("status = %#v, want alive=true ready=false busy=false", status)
+	}
+}
+
+func TestExternalCopilotManagedSessionStatusSurfacesOwnerError(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	sessionName := "hq-mayor"
+	pid := os.Getpid()
+	if err := WriteExternalOwnerStatus(townRoot, sessionName, ExternalCopilotOwnerStatus{OwnerPID: pid, RuntimeSessionID: "runtime-1", Error: "tool execution failed", UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("WriteExternalOwnerStatus() error = %v", err)
+	}
+	sess := &externalCopilotManagedSession{
+		provider:    "copilot-external",
+		role:        "mayor",
+		sessionName: sessionName,
+		runtimeID:   "runtime-1",
+		townRoot:    townRoot,
+		metadata:    OwnerBindingMetadata(ExternalOwnerDir(townRoot, sessionName), pid),
+	}
+	status, err := sess.Status(context.Background())
+	if err == nil {
+		t.Fatal("Status() error = nil, want owner error surfaced")
+	}
+	if !strings.Contains(err.Error(), "external owner reported error: tool execution failed") {
+		t.Fatalf("Status() error = %v, want owner error context", err)
+	}
+	if !status.Alive || status.Ready || status.Busy {
+		t.Fatalf("status = %#v, want alive=true ready=false busy=false", status)
 	}
 }

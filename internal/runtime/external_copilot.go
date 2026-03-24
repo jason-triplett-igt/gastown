@@ -300,11 +300,18 @@ func (s *externalCopilotManagedSession) Status(_ context.Context) (SessionStatus
 			return SessionStatus{Provider: s.provider, SessionID: s.ID(), Ready: false, Alive: false, Busy: false}, err
 		}
 		alive := discovery.OwnerAlive && strings.TrimSpace(s.runtimeID) != ""
+		ready := alive && discovery.HeartbeatLive
 		busy := false
-		if alive && discovery.Status != nil {
+		if ready && discovery.Status != nil {
 			busy = discovery.Status.Busy
 		}
-		return SessionStatus{Provider: s.provider, SessionID: s.ID(), Ready: alive, Alive: alive, Busy: busy}, nil
+		status := SessionStatus{Provider: s.provider, SessionID: s.ID(), Ready: ready, Alive: alive, Busy: busy}
+		if discovery.Status != nil && strings.TrimSpace(discovery.Status.Error) != "" {
+			status.Ready = false
+			status.Busy = false
+			return status, fmt.Errorf("external owner reported error: %s", strings.TrimSpace(discovery.Status.Error))
+		}
+		return status, nil
 	}
 	return SessionStatus{
 		Provider:  s.provider,
