@@ -389,6 +389,95 @@ func TestStart_UsesAdapterForNonClaudeRoleConfig(t *testing.T) {
 	}
 }
 
+func TestDeaconStartsExternalCopilotSession(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTownMarker(t, townRoot)
+	settings := config.NewTownSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{
+		"copilot-external": {
+			Provider: "copilot",
+			Command:  "copilot",
+			CLIURL:   "http://127.0.0.1:4321",
+		},
+	}
+	settings.RoleAgents = map[string]string{"deacon": "copilot-external"}
+	if err := config.SaveTownSettings(filepath.Join(townRoot, "settings", "config.json"), settings); err != nil {
+		t.Fatalf("SaveTownSettings() error = %v", err)
+	}
+	adapter := &fakeRuntimeStarter{}
+	m := &Manager{townRoot: townRoot, tmux: &mockTmux{}, adapter: adapter}
+
+	if err := m.Start(""); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if len(adapter.requests) != 1 {
+		t.Fatalf("adapter requests = %#v, want 1", adapter.requests)
+	}
+	request := adapter.requests[0]
+	if request.Provider != "" {
+		t.Fatalf("Provider override = %q, want empty role-config resolution", request.Provider)
+	}
+	if request.Role != "deacon" || request.SessionName != SessionName() {
+		t.Fatalf("request = %#v", request)
+	}
+	if request.SessionKind != config.ToolSessionKindPatrol {
+		t.Fatalf("SessionKind = %q, want %q", request.SessionKind, config.ToolSessionKindPatrol)
+	}
+	if request.ToolPolicy == nil || len(request.ToolPolicy.AvailableTools) == 0 {
+		t.Fatalf("ToolPolicy = %#v, want resolved policy", request.ToolPolicy)
+	}
+	if request.WorkDir != filepath.Join(townRoot, "deacon") {
+		t.Fatalf("WorkDir = %q, want %q", request.WorkDir, filepath.Join(townRoot, "deacon"))
+	}
+	if request.AgentName != "deacon" || request.IssueID != SessionName() {
+		t.Fatalf("request = %#v", request)
+	}
+	if !strings.Contains(request.Prompt, "gt deacon heartbeat") {
+		t.Fatalf("Prompt = %q, want startup patrol instructions", request.Prompt)
+	}
+}
+
+func TestDeaconResumesStoredExternalBinding(t *testing.T) {
+	townRoot := t.TempDir()
+	writeTownMarker(t, townRoot)
+	binding := runtime.SessionBinding{
+		IssueID:          SessionName(),
+		Role:             "deacon",
+		AgentName:        "deacon",
+		Provider:         "copilot-external",
+		SessionName:      SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		WorkDir:          filepath.Join(townRoot, "deacon"),
+		Metadata:         map[string]string{"session_kind": "patrol"},
+	}
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &fakeRuntimeStarter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: true}}}
+	m := &Manager{townRoot: townRoot, tmux: &mockTmux{}, adapter: adapter}
+
+	running, err := m.IsRunning()
+	if err != nil {
+		t.Fatalf("IsRunning() error = %v", err)
+	}
+	if !running {
+		t.Fatal("IsRunning() = false, want true")
+	}
+	if adapter.lookupReq == nil {
+		t.Fatal("lookupReq = nil, want lookup from stored binding")
+	}
+	if adapter.lookupReq.SessionID != "runtime-xyz" {
+		t.Fatalf("SessionID = %q, want runtime-xyz", adapter.lookupReq.SessionID)
+	}
+	if adapter.lookupReq.Provider != "copilot-external" {
+		t.Fatalf("Provider = %q, want copilot-external", adapter.lookupReq.Provider)
+	}
+	if adapter.lookupReq.Metadata["session_kind"] != "patrol" {
+		t.Fatalf("Metadata = %#v, want session_kind=patrol", adapter.lookupReq.Metadata)
+	}
+}
+
 func TestLifecycleStateReportsStoppingFromBinding(t *testing.T) {
 	townRoot := t.TempDir()
 	writeTownMarker(t, townRoot)
