@@ -665,6 +665,34 @@ func TestComputeExpectedNoBase(t *testing.T) {
 	}
 }
 
+func TestSessionStartHookBuildsPrimeContext(t *testing.T) {
+	tmpDir := t.TempDir()
+	setTestHome(t, tmpDir)
+
+	for _, target := range []string{"mayor", "witness", "deacon", "refinery", "gastown/crew"} {
+		t.Run(target, func(t *testing.T) {
+			expected, err := ComputeExpected(target)
+			if err != nil {
+				t.Fatalf("ComputeExpected(%q) error = %v", target, err)
+			}
+			if len(expected.SessionStart) == 0 {
+				t.Fatalf("SessionStart hooks for %q = none, want gt prime --hook", target)
+			}
+			found := false
+			for _, entry := range expected.SessionStart {
+				for _, hook := range entry.Hooks {
+					if strings.Contains(hook.Command, "gt prime --hook") {
+						found = true
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("SessionStart hooks for %q do not include gt prime --hook: %#v", target, expected.SessionStart)
+			}
+		})
+	}
+}
+
 // TestComputeExpectedWitnessRigSpecific verifies patrol-formula-guard propagates
 // to rig-specific witness targets (e.g., sky/witness) via the witness role default.
 func TestComputeExpectedWitnessRigSpecific(t *testing.T) {

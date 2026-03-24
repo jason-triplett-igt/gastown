@@ -567,6 +567,59 @@ func TestGetStartupFallbackInfo_InformationalHooks(t *testing.T) {
 	}
 }
 
+func TestResumeSessionDoesNotDoubleInjectPrimeContext(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		PromptMode: "arg",
+		Hooks: &config.RuntimeHooksConfig{
+			Provider:      "copilot",
+			Informational: true,
+		},
+	}
+
+	commands := StartupFallbackCommands("witness", rc)
+	if len(commands) != 1 {
+		t.Fatalf("StartupFallbackCommands() len = %d, want 1", len(commands))
+	}
+	if commands[0] != "gt prime && gt mail check --inject" {
+		t.Fatalf("StartupFallbackCommands() = %#v, want single prime/mail command", commands)
+	}
+
+	fallback := GetStartupPromptFallback(rc)
+	if fallback.Send {
+		t.Fatal("GetStartupPromptFallback() Send = true, want false for prompt-capable runtime")
+	}
+	if fallback.DelayMs != DefaultPrimeWaitMs {
+		t.Fatalf("DelayMs = %d, want %d", fallback.DelayMs, DefaultPrimeWaitMs)
+	}
+}
+
+func TestRoleContextIncludesIssueRoleAndRigMetadata(t *testing.T) {
+	rc := &config.RuntimeConfig{
+		PromptMode: "none",
+		Hooks: &config.RuntimeHooksConfig{
+			Provider: "none",
+		},
+	}
+	fallback := GetStartupFallbackInfo(rc)
+	if !fallback.IncludePrimeInBeacon {
+		t.Fatal("IncludePrimeInBeacon = false, want true for non-hook runtime")
+	}
+	if !fallback.SendBeaconNudge {
+		t.Fatal("SendBeaconNudge = false, want true for no-prompt runtime")
+	}
+	if !fallback.SendStartupNudge {
+		t.Fatal("SendStartupNudge = false, want true for non-hook runtime")
+	}
+	instruction := BeaconPrimeInstruction()
+	if instruction == "" || !contains(instruction, "gt prime") {
+		t.Fatalf("BeaconPrimeInstruction() = %q, want gt prime guidance", instruction)
+	}
+	content := StartupNudgeContent()
+	if !contains(content, "gt hook") {
+		t.Fatalf("StartupNudgeContent() = %q, want gt hook guidance", content)
+	}
+}
+
 func TestStartupFallbackCommands_InformationalHooks(t *testing.T) {
 	// Copilot has hooks provider set but informational — should still get fallback commands.
 	rc := &config.RuntimeConfig{
