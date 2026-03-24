@@ -7,12 +7,12 @@ import (
 
 func TestBeaconRecipient(t *testing.T) {
 	tests := []struct {
-		name     string
-		role     string
-		agentNm  string
-		rig      string
-		want     string
-		wantNot  []string // must NOT contain these (path separators, etc.)
+		name    string
+		role    string
+		agentNm string
+		rig     string
+		want    string
+		wantNot []string // must NOT contain these (path separators, etc.)
 	}{
 		{
 			name:    "polecat with rig",
@@ -375,6 +375,42 @@ func TestFormatStartupBeacon(t *testing.T) {
 				"gt mail inbox",
 			},
 		},
+		{
+			name: "review beacon includes rig role issue metadata",
+			cfg: BeaconConfig{
+				Recipient: BeaconRecipient("witness", "review", "gastown"),
+				Sender:    "mayor",
+				Topic:     "review",
+				MolID:     "slotmachine-910.3.7",
+			},
+			wantSub: []string{
+				"[GAS TOWN]",
+				"witness review (rig: gastown)",
+				"<- mayor",
+				"review:slotmachine-910.3.7",
+			},
+			wantNot: []string{
+				"gastown/witness/review",
+			},
+		},
+		{
+			name: "lifecycle restart beacon carries rig metadata without work instructions",
+			cfg: BeaconConfig{
+				Recipient: BeaconRecipient("crew", "max", "gastown"),
+				Sender:    "daemon",
+				Topic:     "lifecycle-restart",
+			},
+			wantSub: []string{
+				"[GAS TOWN]",
+				"crew max (rig: gastown)",
+				"<- daemon",
+				"lifecycle-restart",
+			},
+			wantNot: []string{
+				"begin work",
+				"gt prime --hook",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -429,5 +465,53 @@ func TestBuildStartupPrompt(t *testing.T) {
 	// Should have blank line between beacon and instructions
 	if !strings.Contains(got, "\n\n"+instructions) {
 		t.Errorf("BuildStartupPrompt() missing blank line before instructions")
+	}
+}
+
+func TestBuildStartupPrompt_AssignedIncludesPrimeAndInstructionsOnce(t *testing.T) {
+	cfg := BeaconConfig{
+		Recipient: BeaconRecipient("crew", "max", "gastown"),
+		Sender:    "deacon",
+		Topic:     "assigned",
+		MolID:     "slotmachine-910.8.2",
+	}
+	instructions := "Open the assigned worktree and begin work."
+
+	got := BuildStartupPrompt(cfg, instructions)
+
+	if strings.Count(got, "gt prime --hook") != 1 {
+		t.Fatalf("BuildStartupPrompt() = %q, want exactly one gt prime --hook instruction", got)
+	}
+	if !strings.Contains(got, "assigned:slotmachine-910.8.2") {
+		t.Fatalf("BuildStartupPrompt() = %q, want assigned mol id in beacon", got)
+	}
+	if !strings.Contains(got, instructions) {
+		t.Fatalf("BuildStartupPrompt() = %q, want appended instructions", got)
+	}
+	if strings.Count(got, instructions) != 1 {
+		t.Fatalf("BuildStartupPrompt() = %q, want instructions appended once", got)
+	}
+}
+
+func TestBuildStartupPrompt_NonHookBeaconUsesManualPrimeWithoutDuplicateWorkInstructions(t *testing.T) {
+	cfg := BeaconConfig{
+		Recipient:               BeaconRecipient("polecat", "toast", "gastown"),
+		Sender:                  "witness",
+		Topic:                   "assigned",
+		IncludePrimeInstruction: true,
+		ExcludeWorkInstructions: true,
+	}
+	instructions := "Wait for the follow-up startup nudge after priming."
+
+	got := BuildStartupPrompt(cfg, instructions)
+
+	if strings.Count(got, "gt prime`") != 1 {
+		t.Fatalf("BuildStartupPrompt() = %q, want exactly one manual gt prime instruction", got)
+	}
+	if strings.Contains(got, "begin work on your hook") {
+		t.Fatalf("BuildStartupPrompt() = %q, should not include hook work instruction for non-hook beacon", got)
+	}
+	if !strings.Contains(got, instructions) {
+		t.Fatalf("BuildStartupPrompt() = %q, want caller instructions appended", got)
 	}
 }
