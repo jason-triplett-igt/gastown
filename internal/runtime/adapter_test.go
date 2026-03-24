@@ -336,7 +336,7 @@ func TestTmuxSessionAdapterStartPersistsBindingsWithoutIssueID(t *testing.T) {
 	}
 }
 
-func TestTmuxSessionAdapterStartUsesExternalServerCommandWhenConfigured(t *testing.T) {
+func TestTmuxSessionAdapterStartUsesExternalConnector(t *testing.T) {
 	t.Parallel()
 	controller := &fakeSessionController{sessions: make(map[string]bool), alive: make(map[string]bool)}
 	managed := &fakeManagedSession{id: "external-session-123"}
@@ -450,7 +450,7 @@ func TestTmuxSessionAdapterLookupUsesExternalConnector(t *testing.T) {
 	}
 }
 
-func TestTmuxSessionAdapterResumeUsesExternalServerCommandWhenConfigured(t *testing.T) {
+func TestTmuxSessionAdapterResumeUsesExternalConnector(t *testing.T) {
 	t.Parallel()
 	controller := &fakeSessionController{sessions: make(map[string]bool), alive: make(map[string]bool)}
 	store := &fakeBindingStore{}

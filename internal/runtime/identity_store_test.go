@@ -53,6 +53,61 @@ func TestFileSessionBindingStoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestExternalBindingMetadataRoundTrip(t *testing.T) {
+	t.Parallel()
+	store := NewFileSessionBindingStore(t.TempDir())
+	binding := SessionBinding{
+		IssueID:          "slotmachine-910.9.1",
+		Role:             "witness",
+		RigName:          "gastown",
+		AgentName:        "watch",
+		Provider:         "copilot-external",
+		SessionName:      "gt-witness-external",
+		RuntimeSessionID: "runtime-session-999",
+		WorkDir:          "/tmp/gastown/witness",
+		Metadata: map[string]string{
+			ExternalOwnerModeMetadataKey: ExternalOwnerModeQueue,
+			ExternalOwnerDirMetadataKey:  "/tmp/gastown/.runtime/copilot-owner/gt-witness-external",
+			ExternalOwnerPIDMetadataKey:  "4321",
+			"session_kind":               "review",
+			"external_server":            "true",
+			"cli_url":                    "http://127.0.0.1:4321",
+		},
+	}
+
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	got, err := store.Load(context.Background(), binding.IssueID, binding.Role, binding.RigName, binding.AgentName)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got == nil {
+		t.Fatal("Load() = nil, want binding")
+	}
+	if got.RuntimeSessionID != binding.RuntimeSessionID {
+		t.Fatalf("RuntimeSessionID = %q, want %q", got.RuntimeSessionID, binding.RuntimeSessionID)
+	}
+	if !IsExternalOwnerBinding(got) {
+		t.Fatalf("IsExternalOwnerBinding(%#v) = false, want true", got.Metadata)
+	}
+	if OwnerPIDFromMetadata(got.Metadata) != 4321 {
+		t.Fatalf("OwnerPIDFromMetadata(%#v) = %d, want 4321", got.Metadata, OwnerPIDFromMetadata(got.Metadata))
+	}
+	if got.Metadata[ExternalOwnerDirMetadataKey] != "/tmp/gastown/.runtime/copilot-owner/gt-witness-external" {
+		t.Fatalf("owner dir metadata = %q", got.Metadata[ExternalOwnerDirMetadataKey])
+	}
+	if got.Metadata["session_kind"] != "review" {
+		t.Fatalf("session_kind = %q, want review", got.Metadata["session_kind"])
+	}
+	if got.Metadata["cli_url"] != "http://127.0.0.1:4321" {
+		t.Fatalf("cli_url = %q, want http://127.0.0.1:4321", got.Metadata["cli_url"])
+	}
+	if got.Metadata["external_server"] != "true" {
+		t.Fatalf("external_server = %q, want true", got.Metadata["external_server"])
+	}
+}
+
 func TestBindingKeySanitizesComponents(t *testing.T) {
 	t.Parallel()
 	got := bindingKey("GT-123/abc", "Polecat", "My Rig", "dealer@one")
