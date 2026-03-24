@@ -603,7 +603,7 @@ func TestExternalOwnerResumeReusesRuntimeSessionID(t *testing.T) {
 	if recorder.lastPayload["role"] != "witness" || recorder.lastPayload["issue"] != "slotmachine-910.2.1" || recorder.lastPayload["provider"] != "copilot-external" {
 		t.Fatalf("last payload = %#v", recorder.lastPayload)
 	}
-	if recorder.lastPayload["work_dir"] != workDir || recorder.lastPayload["metadata_external_server"] != "true" || recorder.lastPayload["metadata_cli_url"] != "https://copilot.example" {
+	if recorder.lastPayload["work_dir"] != workDir || recorder.lastPayload["metadata_external_server"] != "true" || recorder.lastPayload["metadata_cli_url"] != "https://copilot.example" || recorder.lastPayload["metadata_owner_mode"] != ExternalOwnerModeQueue || recorder.lastPayload["metadata_owner_pid"] != "5432" {
 		t.Fatalf("last payload = %#v", recorder.lastPayload)
 	}
 	if controller.created {
