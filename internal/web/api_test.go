@@ -18,22 +18,26 @@ func TestParseAgentsFromStatusUsesRuntimeHealthFields(t *testing.T) {
 	jsonStr := `{
 	  "agents": [
 	    {"name": "mayor", "running": true, "ready": false, "busy": true},
-	    {"name": "deacon", "running": true, "ready": true, "busy": false},
-	    {"name": "witness", "running": false, "ready": false, "busy": false}
+	    {"name": "deacon", "running": true, "ready": true, "busy": true},
+	    {"name": "witness", "running": true, "ready": true, "busy": false},
+	    {"name": "refinery", "running": false, "ready": false, "busy": false}
 	  ]
 	}`
 	agents := parseAgentsFromStatus(jsonStr)
-	if len(agents) != 3 {
-		t.Fatalf("parseAgentsFromStatus() returned %d agents, want 3", len(agents))
+	if len(agents) != 4 {
+		t.Fatalf("parseAgentsFromStatus() returned %d agents, want 4", len(agents))
 	}
 	if agents[0].Status != "degraded" || !agents[0].Running {
 		t.Fatalf("agents[0] = %#v, want degraded running agent", agents[0])
 	}
-	if agents[1].Status != "running" || !agents[1].Running {
-		t.Fatalf("agents[1] = %#v, want running agent", agents[1])
+	if agents[1].Status != "busy" || !agents[1].Running {
+		t.Fatalf("agents[1] = %#v, want busy running agent", agents[1])
 	}
-	if agents[2].Status != "stopped" || agents[2].Running {
-		t.Fatalf("agents[2] = %#v, want stopped agent", agents[2])
+	if agents[2].Status != "running" || !agents[2].Running {
+		t.Fatalf("agents[2] = %#v, want running agent", agents[2])
+	}
+	if agents[3].Status != "stopped" || agents[3].Running {
+		t.Fatalf("agents[3] = %#v, want stopped agent", agents[3])
 	}
 }
 

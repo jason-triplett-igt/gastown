@@ -338,7 +338,14 @@
                 return { value: opt, label: opt, disabled: false };
             }
             // Agent format: {name, status, running}
-            var statusText = opt.running ? '● running' : '○ stopped';
+            var statusText = '○ stopped';
+            if (opt.status === 'degraded') {
+                statusText = '◐ degraded';
+            } else if (opt.status === 'busy') {
+                statusText = '● busy';
+            } else if (opt.running) {
+                statusText = '● running';
+            }
             return {
                 value: opt.name,
                 label: opt.name + ' (' + statusText + ')',
