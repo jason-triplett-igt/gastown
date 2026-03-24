@@ -128,9 +128,11 @@ func runExternalCopilotOwner(cmd *cobra.Command, args []string) error {
 			if err != nil {
 				continue
 			}
+			_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: true, UpdatedAt: time.Now().UTC()})
 			request, err := runtime.ReadExternalOwnerRequest(claimedPath)
 			if err != nil {
 				_ = runtime.RemoveExternalOwnerRequest(claimedPath)
+				_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: false, UpdatedAt: time.Now().UTC()})
 				continue
 			}
 			response := runtime.ExternalCopilotOwnerResponse{ID: request.ID, CreatedAt: time.Now().UTC()}
@@ -181,9 +183,9 @@ func runExternalCopilotOwner(cmd *cobra.Command, args []string) error {
 				_ = runtime.WriteExternalOwnerResponse(cfg.TownRoot, cfg.SessionName, response)
 			}
 			_ = runtime.RemoveExternalOwnerRequest(claimedPath)
-			_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, UpdatedAt: time.Now().UTC(), Error: response.Error})
+			_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: false, UpdatedAt: time.Now().UTC(), Error: response.Error})
 		}
-		_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, UpdatedAt: time.Now().UTC()})
+		_ = runtime.WriteExternalOwnerStatus(cfg.TownRoot, cfg.SessionName, runtime.ExternalCopilotOwnerStatus{OwnerPID: ownerPID, RuntimeSessionID: session.SessionID, Busy: false, UpdatedAt: time.Now().UTC()})
 		time.Sleep(200 * time.Millisecond)
 	}
 }

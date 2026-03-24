@@ -300,7 +300,11 @@ func (s *externalCopilotManagedSession) Status(_ context.Context) (SessionStatus
 			return SessionStatus{Provider: s.provider, SessionID: s.ID(), Ready: false, Alive: false, Busy: false}, err
 		}
 		alive := discovery.OwnerAlive && strings.TrimSpace(s.runtimeID) != ""
-		return SessionStatus{Provider: s.provider, SessionID: s.ID(), Ready: alive, Alive: alive, Busy: false}, nil
+		busy := false
+		if discovery.Status != nil {
+			busy = discovery.Status.Busy
+		}
+		return SessionStatus{Provider: s.provider, SessionID: s.ID(), Ready: alive, Alive: alive, Busy: busy}, nil
 	}
 	return SessionStatus{
 		Provider:  s.provider,

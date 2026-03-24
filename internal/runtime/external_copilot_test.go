@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"context"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/toolapi"
@@ -100,5 +102,30 @@ func TestExternalCopilotManagedSessionSendRequiresOwnerManagedBinding(t *testing
 	}
 	if got := err.Error(); got != "external copilot session is not owner-managed" {
 		t.Fatalf("Send() error = %q, want external copilot session is not owner-managed", got)
+	}
+}
+
+func TestExternalCopilotManagedSessionStatusReflectsOwnerBusyBit(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	sessionName := "hq-mayor"
+	pid := os.Getpid()
+	if err := WriteExternalOwnerStatus(townRoot, sessionName, ExternalCopilotOwnerStatus{OwnerPID: pid, RuntimeSessionID: "runtime-1", Busy: true, UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("WriteExternalOwnerStatus() error = %v", err)
+	}
+	sess := &externalCopilotManagedSession{
+		provider:    "copilot-external",
+		role:        "mayor",
+		sessionName: sessionName,
+		runtimeID:   "runtime-1",
+		townRoot:    townRoot,
+		metadata:    OwnerBindingMetadata(ExternalOwnerDir(townRoot, sessionName), pid),
+	}
+	status, err := sess.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if !status.Alive || !status.Ready || !status.Busy {
+		t.Fatalf("status = %#v, want alive+ready+busy", status)
 	}
 }

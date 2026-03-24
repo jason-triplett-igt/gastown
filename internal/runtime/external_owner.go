@@ -55,6 +55,7 @@ type ExternalCopilotOwnerConfig struct {
 type ExternalCopilotOwnerStatus struct {
 	OwnerPID         int       `json:"owner_pid,omitempty"`
 	RuntimeSessionID string    `json:"runtime_session_id,omitempty"`
+	Busy             bool      `json:"busy,omitempty"`
 	Error            string    `json:"error,omitempty"`
 	UpdatedAt        time.Time `json:"updated_at"`
 }
