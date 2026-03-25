@@ -2,16 +2,19 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/runtime"
 )
 
 func captureStderr(t *testing.T, fn func()) string {
@@ -294,6 +297,39 @@ func TestOutputStatusJSONIncludesRuntimeHealthFields(t *testing.T) {
 	if !parsed.Rigs[0].Agents[0].Ready || parsed.Rigs[0].Agents[0].Busy {
 		t.Fatalf("parsed rig agent = %#v, want ready=true busy=false", parsed.Rigs[0].Agents[0])
 	}
+}
+
+func TestDiscoverGlobalAgentsUsesCanonicalBindingRoleForMayor(t *testing.T) {
+	townRoot := t.TempDir()
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	binding := runtime.SessionBinding{
+		IssueID:          beads.MayorBeadIDTown(),
+		Role:             "mayor",
+		AgentName:        "mayor",
+		Provider:         "copilot-external",
+		SessionName:      "hq-mayor",
+		RuntimeSessionID: "runtime-xyz",
+		UpdatedAt:        time.Now().UTC(),
+		WorkDir:          filepath.Join(townRoot, "mayor"),
+		Metadata:         map[string]string{"external_server": "true", "cli_url": "http://127.0.0.1:4321"},
+	}
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	agents := discoverGlobalAgents(townRoot, map[string]bool{}, nil, nil, nil, true)
+	if len(agents) != 2 {
+		t.Fatalf("discoverGlobalAgents() len = %d, want 2", len(agents))
+	}
+	for _, agent := range agents {
+		if agent.Name != "mayor" {
+			continue
+		}
+		if agent.Running {
+			t.Fatalf("mayor agent = %#v, want lookup miss until runtime config is resolvable in test fixture", agent)
+		}
+		return
+	}
+	t.Fatal("mayor agent not found")
 }
 
 func TestRenderAgentDetails_IncludesRuntimeHealthLineForDegradedAgent(t *testing.T) {

@@ -1624,14 +1624,15 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 	// Define agents to discover
 	// Note: Mayor and Deacon are town-level agents with hq- prefix bead IDs
 	agentDefs := []struct {
-		name    string
-		address string
-		session string
-		role    string
-		beadID  string
+		name     string
+		address  string
+		session  string
+		role     string
+		bindRole string
+		beadID   string
 	}{
-		{constants.RoleMayor, constants.RoleMayor + "/", mayorSession, "coordinator", beads.MayorBeadIDTown()},
-		{constants.RoleDeacon, constants.RoleDeacon + "/", deaconSession, "health-check", beads.DeaconBeadIDTown()},
+		{constants.RoleMayor, constants.RoleMayor + "/", mayorSession, "coordinator", constants.RoleMayor, beads.MayorBeadIDTown()},
+		{constants.RoleDeacon, constants.RoleDeacon + "/", deaconSession, "health-check", constants.RoleDeacon, beads.DeaconBeadIDTown()},
 	}
 
 	agents := make([]AgentRuntime, len(agentDefs))
@@ -1640,11 +1641,12 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 	for i, def := range agentDefs {
 		wg.Add(1)
 		go func(idx int, d struct {
-			name    string
-			address string
-			session string
-			role    string
-			beadID  string
+			name     string
+			address  string
+			session  string
+			role     string
+			bindRole string
+			beadID   string
 		}) {
 			defer wg.Done()
 
@@ -1668,7 +1670,7 @@ func discoverGlobalAgents(townRoot string, allSessions map[string]bool, allAgent
 				}
 			}
 
-			if status, ok := managedAgentStatus(townRoot, "", d.role, d.session, d.name); ok {
+			if status, ok := managedAgentStatus(townRoot, "", d.bindRole, d.session, d.name); ok {
 				applyManagedAgentStatus(&agent, status)
 			}
 
