@@ -38,6 +38,11 @@ type serverState struct {
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
+var (
+	statusServer = Status
+	startServer  = Start
+)
+
 func ResolveCLIURLForTown(townRoot string) (string, error) {
 	rc := config.ResolveRoleAgentConfig("mayor", townRoot, "")
 	if rc == nil || !strings.EqualFold(strings.TrimSpace(rc.Provider), "copilot") || strings.TrimSpace(rc.CLIURL) == "" {
@@ -60,17 +65,17 @@ func IsManagedCLIURL(raw string) bool {
 }
 
 func EnsureServer(ctx context.Context, townRoot string) (*ServerStatus, error) {
-	status, err := Status(townRoot)
+	status, err := statusServer(townRoot)
 	if err != nil {
 		return nil, err
 	}
 	if status.Healthy {
 		return status, nil
 	}
-	if !status.Managed {
+	if !status.Managed && !IsManagedCLIURL(status.CLIURL) {
 		return nil, fmt.Errorf("copilot server at %s is unhealthy and not Gastown-managed", status.CLIURL)
 	}
-	return Start(ctx, townRoot)
+	return startServer(ctx, townRoot)
 }
 
 func Start(ctx context.Context, townRoot string) (*ServerStatus, error) {

@@ -254,7 +254,7 @@ func askSystemMessage(binding *runtime.SessionBinding) *copilot.SystemMessageCon
 		content += " You are not being asked to resume refinery patrol. Answer directly from current context instead of attempting merge-queue automation."
 	}
 	if binding.Role == "mayor" || binding.Role == "deacon" {
-		content += " For delegation or coordination requests, perform the required tool actions first. Only reply after a tool result confirms success, or after a tool result confirms failure and you can state that failure directly. If notification is requested, use send_mail or nudge_agent rather than describing what you would do."
+		content += " For delegation or coordination requests, perform the required tool actions first. Only reply after a tool result confirms success, or after a tool result confirms failure and you can state that failure directly. If notification is requested, use send_mail or nudge_agent rather than describing what you would do. Never reply with only DONE, OK, or a similarly content-free acknowledgment; include the concrete outcome, what agent or workspace was used, and any key file paths or blockers."
 	}
 	return &copilot.SystemMessageConfig{Mode: "append", Content: content}
 }
@@ -266,7 +266,7 @@ func askTurnPrefix(binding *runtime.SessionBinding) string {
 	base := "Operator direct request for this turn only. Do not continue patrol or startup behavior. Do not answer with planning text or future-tense promises. Use only currently available tools."
 	switch binding.Role {
 	case "mayor", "deacon":
-		return base + " If delegation or notification is requested, perform the required send_mail or nudge_agent actions before replying. Reply only after a tool result confirms success or failure."
+		return base + " If delegation or notification is requested, perform the required send_mail or nudge_agent actions before replying. Reply only after a tool result confirms success or failure. Never return only DONE, OK, or an empty acknowledgment; include the concrete outcome, what agent or workspace was used, and any key file paths or blockers."
 	case "witness", "refinery":
 		return base + " Answer directly from current context instead of re-entering review or patrol workflows."
 	default:
@@ -277,6 +277,9 @@ func askTurnPrefix(binding *runtime.SessionBinding) string {
 func askTurnMessage(binding *runtime.SessionBinding, message string) string {
 	message = strings.TrimSpace(message)
 	prefix := strings.TrimSpace(askTurnPrefix(binding))
+	if binding != nil && (binding.Role == "mayor" || binding.Role == "deacon") {
+		message += "\n\nReply requirements: include a concrete outcome sentence with any agent/workspace used and any key file paths or blockers. Do not reply with only DONE or OK."
+	}
 	if prefix == "" {
 		return message
 	}

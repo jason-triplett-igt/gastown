@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/runtime"
 )
 
 func TestAskCommandRejectsUnsupportedTarget(t *testing.T) {
@@ -94,6 +96,20 @@ func TestShouldRecoverAsk(t *testing.T) {
 				t.Fatalf("shouldRecoverAsk(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestAskTurnMessageForMayorRequiresConcreteReply(t *testing.T) {
+	binding := &runtime.SessionBinding{Role: "mayor"}
+	message := askTurnMessage(binding, "Please orchestrate hello world")
+	for _, want := range []string{
+		"Never return only DONE, OK, or an empty acknowledgment",
+		"Reply requirements: include a concrete outcome sentence",
+		"Do not reply with only DONE or OK.",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("askTurnMessage() missing %q in %q", want, message)
+		}
 	}
 }
 
