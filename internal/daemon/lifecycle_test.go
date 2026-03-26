@@ -577,7 +577,7 @@ func TestGetStartCommand_ClaudeAgentFallsThrough(t *testing.T) {
 		"[GAS TOWN]",
 		"witness <- daemon",
 		"lifecycle-restart",
-		"Run `gt prime --hook` and begin work.",
+		"Run \\`gt prime --hook\\` and begin work.",
 	} {
 		if !strings.Contains(startCmd, want) {
 			t.Errorf("getStartCommand() = %q, want substring %q", startCmd, want)
@@ -617,13 +617,13 @@ func TestGetStartCommand_LifecycleRestartUsesNonPathRecipientForCrew(t *testing.
 		"[GAS TOWN]",
 		"crew max (rig: gastown) <- daemon",
 		"lifecycle-restart",
-		"Run `gt prime --hook` and begin work.",
+		"Run \\`gt prime --hook\\` and begin work.",
 	} {
 		if !strings.Contains(startCmd, want) {
 			t.Fatalf("getStartCommand() = %q, want substring %q", startCmd, want)
 		}
 	}
-	for _, notWant := range []string{"gastown/crew/max", "Run `gt prime` to initialize your context."} {
+	for _, notWant := range []string{"gastown/crew/max <- daemon", "Run `gt prime` to initialize your context."} {
 		if strings.Contains(startCmd, notWant) {
 			t.Fatalf("getStartCommand() = %q, should not contain %q", startCmd, notWant)
 		}
