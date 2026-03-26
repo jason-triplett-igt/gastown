@@ -3,10 +3,12 @@ package polecat
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -17,8 +19,41 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	runtimepkg "github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/testutil"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
+
+func newSessionManagerTestBeads(t *testing.T, rigPath string) *beads.Beads {
+	t.Helper()
+
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd not found")
+	}
+
+	testutil.RequireDoltContainer(t)
+	portStr := testutil.DoltContainerPort()
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("invalid dolt port %q: %v", portStr, err)
+	}
+
+	return beads.NewIsolatedWithPort(rigPath, port)
+}
+
+func initSessionManagerTestBeads(t *testing.T, b *beads.Beads, base string) {
+	t.Helper()
+
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(t.Name()))
+	prefix := fmt.Sprintf("%s-%x", base, h.Sum32())
+	if len(prefix) > 20 {
+		prefix = prefix[:20]
+	}
+
+	if err := b.Init(prefix); err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+}
 
 type fakeManagedSession struct {
 	status   runtimepkg.SessionStatus
@@ -511,10 +546,8 @@ func TestValidateVSDDDispatchAllowsSatisfiedIssue(t *testing.T) {
 		t.Fatal(err)
 	}
 	issueID := "slotmachine-910"
-	b := beads.NewIsolated(rigPath)
-	if err := b.Init("testgate"); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
+	b := newSessionManagerTestBeads(t, rigPath)
+	initSessionManagerTestBeads(t, b, "testgate")
 	desc := beads.SetVSDDPhaseFields(&beads.Issue{}, &beads.VSDDPhaseFields{Phase: beads.VSDDPhaseImplementation, SpecApproved: true, TestsRed: true})
 	desc = beads.SetVSDDArtifactFields(&beads.Issue{Description: desc}, &beads.VSDDArtifactFields{
 		SpecArtifactID:       "spec-1",
@@ -549,10 +582,8 @@ func TestValidateVSDDDispatchBlocksMissingArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 	issueID := "slotmachine-911"
-	b := beads.NewIsolated(rigPath)
-	if err := b.Init("testgate"); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
+	b := newSessionManagerTestBeads(t, rigPath)
+	initSessionManagerTestBeads(t, b, "testgate")
 	desc := beads.SetVSDDPhaseFields(&beads.Issue{}, &beads.VSDDPhaseFields{Phase: beads.VSDDPhaseImplementation, SpecApproved: true, TestsRed: true})
 	created, err := b.Create(beads.CreateOptions{Title: "Task", Description: desc, Labels: []string{"gt:task"}})
 	if err != nil {
@@ -581,10 +612,8 @@ func TestValidateVSDDDispatchBlocksOnReviewGate(t *testing.T) {
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	b := beads.NewIsolated(rigPath)
-	if err := b.Init("testgate"); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
+	b := newSessionManagerTestBeads(t, rigPath)
+	initSessionManagerTestBeads(t, b, "testgate")
 	desc := beads.SetVSDDPhaseFields(&beads.Issue{}, &beads.VSDDPhaseFields{
 		Phase:          beads.VSDDPhaseConvergence,
 		SpecApproved:   true,
@@ -1164,10 +1193,8 @@ func TestInspectWorkflowStateReturnsInspection(t *testing.T) {
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	b := beads.NewIsolated(rigPath)
-	if err := b.Init("inspect"); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
+	b := newSessionManagerTestBeads(t, rigPath)
+	initSessionManagerTestBeads(t, b, "inspect")
 	desc := beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{
 		Phase:          beads.VSDDPhaseImplementation,
 		SpecApproved:   true,
@@ -1200,10 +1227,8 @@ func TestReadyIssuesForRuntimeReturnsReadyList(t *testing.T) {
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	b := beads.NewIsolated(rigPath)
-	if err := b.Init("ready-runtime"); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
+	b := newSessionManagerTestBeads(t, rigPath)
+	initSessionManagerTestBeads(t, b, "ready-runtime")
 	created, err := b.Create(beads.CreateOptions{Title: "Ready Task", Description: "runtime ready", Labels: []string{"gt:task"}})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
@@ -1234,10 +1259,8 @@ func TestLoadReviewForRuntimeReturnsWorkflowDetails(t *testing.T) {
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	b := beads.NewIsolated(rigPath)
-	if err := b.Init("review-runtime"); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
+	b := newSessionManagerTestBeads(t, rigPath)
+	initSessionManagerTestBeads(t, b, "review-runtime")
 	desc := beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{
 		Phase:          beads.VSDDPhaseReview,
 		SpecApproved:   true,
@@ -1276,10 +1299,8 @@ func TestVerifyIssueForRuntimeReturnsVerificationStatus(t *testing.T) {
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	b := beads.NewIsolated(rigPath)
-	if err := b.Init("verify-runtime"); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
+	b := newSessionManagerTestBeads(t, rigPath)
+	initSessionManagerTestBeads(t, b, "verify-runtime")
 	desc := beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{
 		Phase:          beads.VSDDPhaseConvergence,
 		SpecApproved:   true,
@@ -1319,10 +1340,8 @@ func TestRecordReviewVerdictPersistsStructuredReview(t *testing.T) {
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	b := beads.NewIsolated(rigPath)
-	if err := b.Init("record-review"); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
+	b := newSessionManagerTestBeads(t, rigPath)
+	initSessionManagerTestBeads(t, b, "record-review")
 	desc := beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{
 		Phase:          beads.VSDDPhaseReview,
 		SpecApproved:   true,
@@ -1370,10 +1389,8 @@ func TestRecordReviewVerdictRejectsMalformedReview(t *testing.T) {
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	b := beads.NewIsolated(rigPath)
-	if err := b.Init("record-review-malformed"); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
+	b := newSessionManagerTestBeads(t, rigPath)
+	initSessionManagerTestBeads(t, b, "record-review-malformed")
 	desc := beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{Phase: beads.VSDDPhaseReview, SpecApproved: true, TestsRed: true, Implementation: true}, &beads.VSDDArtifactFields{SpecArtifactID: "spec-1", SpecReviewArtifactID: "spec-review-1", TestPlanArtifactID: "tests-1", RedTestEvidenceID: "red-1", ImplementationArtifactID: "impl-1", BuilderEvidenceID: "builder-1"})
 	created, err := b.Create(beads.CreateOptions{Title: "Malformed Review Task", Description: desc, Labels: []string{"gt:task"}})
 	if err != nil {
@@ -1396,10 +1413,8 @@ func TestValidateVSDDDispatchBlocksMalformedReviewForConvergence(t *testing.T) {
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	b := beads.NewIsolated(rigPath)
-	if err := b.Init("dispatch-review-block"); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
+	b := newSessionManagerTestBeads(t, rigPath)
+	initSessionManagerTestBeads(t, b, "dispatch-review-block")
 	desc := beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{
 		Phase:          beads.VSDDPhaseConvergence,
 		SpecApproved:   true,
@@ -1443,10 +1458,8 @@ func TestExplainWorkflowStateIncludesReviewIntegrityDetails(t *testing.T) {
 	if err := os.MkdirAll(rigPath, 0755); err != nil {
 		t.Fatal(err)
 	}
-	b := beads.NewIsolated(rigPath)
-	if err := b.Init("explain-review"); err != nil {
-		t.Fatalf("Init() error = %v", err)
-	}
+	b := newSessionManagerTestBeads(t, rigPath)
+	initSessionManagerTestBeads(t, b, "explain-review")
 	desc, err := beads.PersistReviewVerdict(&beads.Issue{Description: beads.PersistVSDDState(&beads.Issue{}, &beads.VSDDPhaseFields{Phase: beads.VSDDPhaseReview, SpecApproved: true, TestsRed: true, Implementation: true}, &beads.VSDDArtifactFields{SpecArtifactID: "spec-1", SpecReviewArtifactID: "spec-review-1", TestPlanArtifactID: "tests-1", RedTestEvidenceID: "red-1", ImplementationArtifactID: "impl-1", BuilderEvidenceID: "builder-1"})}, beads.VSDDReviewVerdictInput{Verdict: "NOT READY", Summary: "Regression evidence is incomplete.", EvidenceRefs: []string{"spec-1", "builder-1"}, Findings: []string{"missing regression test"}, FreshContext: true, ReviewArtifactID: "review-1"})
 	if err != nil {
 		t.Fatalf("PersistReviewVerdict() error = %v", err)
