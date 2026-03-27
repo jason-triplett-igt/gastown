@@ -528,6 +528,12 @@ func runDeaconAttach(cmd *cobra.Command, args []string) error {
 		}
 	}
 	// Session uses a respawn loop, so Claude restarts automatically if it exits
+	if message, ok, err := headlessManagedAttachMessage(townRoot, "deacon", "", "deacon", "gt deacon status"); err != nil {
+		return err
+	} else if ok {
+		fmt.Println(message)
+		return nil
+	}
 
 	// Use shared attach helper (smart: links if inside tmux, attaches if outside)
 	return attachToTmuxSession(sessionName)
