@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only clean test test-e2e-container check-up-to-date
+.PHONY: build desktop-build desktop-run install safe-install check-forward-only clean test test-e2e-agent-external-copilot test-e2e-container check-up-to-date
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -144,6 +144,12 @@ clean:
 
 test:
 	go test ./...
+
+# Run live external Copilot integration tests against a headless Copilot server.
+# Requires GT_TEST_COPILOT_CLI_URL (or GT_EXTERNAL_COPILOT_CLI_URL) to point at
+# a running `copilot --headless` instance.
+test-e2e-agent-external-copilot:
+	go test -tags=integration ./internal/cmd -run 'TestExternalCopilotSessionSmoke|TestWitnessLifecycleWithExternalCopilot|TestRefineryLifecycleWithExternalCopilot' -count=1
 
 # Run e2e tests in isolated container (the only supported way to run them)
 test-e2e-container:

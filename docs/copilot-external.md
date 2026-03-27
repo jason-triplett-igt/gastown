@@ -32,7 +32,23 @@ Add an agent entry in `settings/config.json`:
 
 - `gt session smoke <rig> --cli-url http://127.0.0.1:4321`
 - `witness` start/status/stop with `role_agents.witness = "copilot-external"`
-- `refinery` adapter-backed lifecycle support for explicit `copilot-external` selection
+- `refinery` start/status/stop with `role_agents.refinery = "copilot-external"`
+
+## Live test target
+
+Point `GT_TEST_COPILOT_CLI_URL` at a running headless Copilot server, then run:
+
+```bash
+make test-e2e-agent-external-copilot
+```
+
+That target runs:
+
+- `TestExternalCopilotSessionSmoke`
+- `TestWitnessLifecycleWithExternalCopilot`
+- `TestRefineryLifecycleWithExternalCopilot`
+
+The tests also accept `GT_EXTERNAL_COPILOT_CLI_URL` as a fallback env var.
 
 ## Notes
 

@@ -93,6 +93,27 @@ func TestWitnessLifecycleWithExternalCopilot(t *testing.T) {
 	}
 }
 
+func TestRefineryLifecycleWithExternalCopilot(t *testing.T) {
+	cliURL := requireExternalCopilotCLIURL(t)
+	townRoot, rigPath, gtBinary, env := setupExternalCopilotIntegrationWorkspace(t, "refineryext")
+	writeExternalCopilotRigSettings(t, rigPath, cliURL)
+
+	runGTCmdOutput(t, gtBinary, townRoot, env, "refinery", "start", "refineryext")
+	status := waitForRefineryRunningState(t, gtBinary, townRoot, env, "refineryext", true)
+	if status.Session == "" {
+		t.Fatal("refinery status session = empty, want active session name")
+	}
+
+	runGTCmdOutput(t, gtBinary, townRoot, env, "refinery", "stop", "refineryext")
+	status = waitForRefineryRunningState(t, gtBinary, townRoot, env, "refineryext", false)
+	if status.Running {
+		t.Fatalf("refinery status after stop = %#v, want running=false", status)
+	}
+	if status.State != "" && status.State != "stopped" {
+		t.Fatalf("refinery state after stop = %q, want stopped", status.State)
+	}
+}
+
 func requireExternalCopilotCLIURL(t *testing.T) string {
 	t.Helper()
 
@@ -130,7 +151,7 @@ func setupExternalCopilotIntegrationWorkspace(t *testing.T, rigName string) (str
 
 	rigPath := filepath.Join(townRoot, rigName)
 	createTestGitRepoAt(t, rigPath)
-	for _, dir := range []string{"witness", "crew", "settings"} {
+	for _, dir := range []string{"witness", "crew", "settings", filepath.Join("refinery", "rig")} {
 		if err := os.MkdirAll(filepath.Join(rigPath, dir), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
@@ -164,7 +185,10 @@ func writeExternalCopilotRigSettings(t *testing.T, rigPath, cliURL string) {
 			CLIURL:   cliURL,
 		},
 	}
-	settings.RoleAgents = map[string]string{"witness": externalCopilotTestAgent}
+	settings.RoleAgents = map[string]string{
+		"refinery": externalCopilotTestAgent,
+		"witness":  externalCopilotTestAgent,
+	}
 	if err := config.SaveRigSettings(config.RigSettingsPath(rigPath), settings); err != nil {
 		t.Fatalf("save rig settings: %v", err)
 	}
@@ -193,6 +217,33 @@ func readWitnessStatusJSON(t *testing.T, gtBinary, townRoot string, env []string
 	var status WitnessStatusOutput
 	if err := json.Unmarshal([]byte(output), &status); err != nil {
 		t.Fatalf("parse witness status JSON: %v\nraw: %s", err, output)
+	}
+	return status
+}
+
+func waitForRefineryRunningState(t *testing.T, gtBinary, townRoot string, env []string, rigName string, wantRunning bool) RefineryStatusOutput {
+	t.Helper()
+
+	deadline := time.Now().Add(45 * time.Second)
+	for {
+		status := readRefineryStatusJSON(t, gtBinary, townRoot, env, rigName)
+		if status.Running == wantRunning {
+			return status
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("refinery running=%t did not reach %t before timeout: %#v", status.Running, wantRunning, status)
+		}
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func readRefineryStatusJSON(t *testing.T, gtBinary, townRoot string, env []string, rigName string) RefineryStatusOutput {
+	t.Helper()
+
+	output := runGTCmdOutput(t, gtBinary, townRoot, env, "refinery", "status", rigName, "--json")
+	var status RefineryStatusOutput
+	if err := json.Unmarshal([]byte(output), &status); err != nil {
+		t.Fatalf("parse refinery status JSON: %v\nraw: %s", err, output)
 	}
 	return status
 }
