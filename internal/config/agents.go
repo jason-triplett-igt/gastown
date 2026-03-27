@@ -679,12 +679,17 @@ func ResolveProcessNames(agentName, command string) []string {
 	if command != "" {
 		cmdBase = filepath.Base(command)
 	}
+	unwrappedCmdBase := strings.TrimPrefix(cmdBase, "gt-")
 
 	// Check if agentName matches a built-in/registered preset with matching command.
 	// Compare against both the raw command and basename to handle registry entries
 	// that store absolute-path commands (e.g., "/opt/bin/my-tool").
 	if info, ok := globalRegistry.Agents[agentName]; ok && len(info.ProcessNames) > 0 {
-		if info.Command == command || info.Command == cmdBase || filepath.Base(info.Command) == cmdBase || cmdBase == "" {
+		if info.Command == command ||
+			info.Command == cmdBase ||
+			filepath.Base(info.Command) == cmdBase ||
+			(info.Command == unwrappedCmdBase && strings.HasPrefix(cmdBase, "gt-")) ||
+			cmdBase == "" {
 			return info.ProcessNames
 		}
 	}
@@ -692,7 +697,12 @@ func ResolveProcessNames(agentName, command string) []string {
 	// Agent name doesn't match or command differs — look up by command
 	if cmdBase != "" {
 		for _, info := range globalRegistry.Agents {
-			if (info.Command == command || filepath.Base(info.Command) == cmdBase) && len(info.ProcessNames) > 0 {
+			if len(info.ProcessNames) == 0 {
+				continue
+			}
+			if info.Command == command ||
+				filepath.Base(info.Command) == cmdBase ||
+				(strings.HasPrefix(cmdBase, "gt-") && filepath.Base(info.Command) == unwrappedCmdBase) {
 				return info.ProcessNames
 			}
 		}

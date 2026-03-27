@@ -413,6 +413,11 @@ func (m *Manager) Start(foreground bool, agentOverride string) error {
 		_ = runtime.DeliverStartupPromptFallback(t, sessionID, initialPrompt, runtimeConfig, constants.ClaudeStartTimeout)
 	}
 
+	// Track PID for defense-in-depth orphan cleanup (non-fatal)
+	if err := session.TrackSessionPID(townRoot, sessionID, t); err != nil {
+		log.Printf("warning: tracking session PID for %s: %v", sessionID, err)
+	}
+
 	// Stream refinery's Claude Code JSONL conversation log to VictoriaLogs (opt-in).
 	if !resolvedAgentUsesAdapter && os.Getenv("GT_LOG_AGENT_OUTPUT") == "true" && os.Getenv("GT_OTEL_LOGS_URL") != "" {
 		if err := session.ActivateAgentLogging(sessionID, refineryRigDir, runID); err != nil {

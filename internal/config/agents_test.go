@@ -298,6 +298,12 @@ func TestResolveProcessNames(t *testing.T) {
 			want:      []string{"codex"},
 		},
 		{
+			name:      "built-in preset through gt wrapper command",
+			agentName: "codex",
+			command:   "gt-codex",
+			want:      []string{"codex"},
+		},
+		{
 			name:      "unknown agent with known command",
 			agentName: "my-custom-agent",
 			command:   "claude",
