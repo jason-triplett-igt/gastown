@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	runtimepkg "github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -2017,6 +2018,15 @@ func (h *APIHandler) handleSessionPreview(w http.ResponseWriter, r *http.Request
 			h.sendError(w, "tmux capture-pane timed out", http.StatusGatewayTimeout)
 			return
 		}
+		if content, ok := h.externalOwnerPreviewContent(sessionName); ok {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(SessionPreviewResponse{
+				Session:   sessionName,
+				Content:   content,
+				Timestamp: time.Now().Format(time.RFC3339),
+			})
+			return
+		}
 		h.sendError(w, "Failed to capture pane: "+stderr.String(), http.StatusInternalServerError)
 		return
 	}
@@ -2027,6 +2037,78 @@ func (h *APIHandler) handleSessionPreview(w http.ResponseWriter, r *http.Request
 		Content:   stdout.String(),
 		Timestamp: time.Now().Format(time.RFC3339),
 	})
+}
+
+func (h *APIHandler) externalOwnerPreviewContent(sessionName string) (string, bool) {
+	if h == nil || strings.TrimSpace(sessionName) == "" || strings.TrimSpace(h.workDir) == "" {
+		return "", false
+	}
+	store := runtimepkg.NewFileSessionBindingStore(h.workDir)
+	bindings, err := store.List(context.Background(), "", "")
+	if err != nil {
+		return "", false
+	}
+	for _, binding := range bindings {
+		if strings.TrimSpace(binding.SessionName) != strings.TrimSpace(sessionName) {
+			continue
+		}
+		if !runtimepkg.IsExternalOwnerBinding(&binding) {
+			return "", false
+		}
+		if content := externalOwnerPreviewFromLog(h.workDir, sessionName); strings.TrimSpace(content) != "" {
+			return content, true
+		}
+		return externalOwnerPreviewFromStatus(h.workDir, &binding), true
+	}
+	return "", false
+}
+
+func externalOwnerPreviewFromLog(townRoot, sessionName string) string {
+	data, err := os.ReadFile(runtimepkg.ExternalOwnerLogPath(townRoot, sessionName))
+	if err != nil {
+		return ""
+	}
+	return tailPreviewLines(string(data), 30)
+}
+
+func externalOwnerPreviewFromStatus(townRoot string, binding *runtimepkg.SessionBinding) string {
+	if binding == nil {
+		return ""
+	}
+	lines := []string{"[headless external runtime]"}
+	if status, err := runtimepkg.ReadExternalOwnerStatus(townRoot, binding.SessionName); err == nil {
+		lines = append(lines, fmt.Sprintf("runtime_session_id: %s", strings.TrimSpace(status.RuntimeSessionID)))
+		if status.OwnerPID > 0 {
+			lines = append(lines, fmt.Sprintf("owner_pid: %d", status.OwnerPID))
+		}
+		if status.Ready != nil {
+			lines = append(lines, fmt.Sprintf("ready: %t", *status.Ready))
+		}
+		lines = append(lines, fmt.Sprintf("busy: %t", status.Busy))
+		if strings.TrimSpace(status.Error) != "" {
+			lines = append(lines, fmt.Sprintf("error: %s", strings.TrimSpace(status.Error)))
+		}
+		if !status.UpdatedAt.IsZero() {
+			lines = append(lines, fmt.Sprintf("updated_at: %s", status.UpdatedAt.UTC().Format(time.RFC3339)))
+		}
+	}
+	lines = append(lines, fmt.Sprintf("owner_log: %s", runtimepkg.ExternalOwnerLogPath(townRoot, binding.SessionName)))
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func tailPreviewLines(content string, maxLines int) string {
+	if maxLines <= 0 {
+		maxLines = 30
+	}
+	trimmed := strings.TrimRight(content, "\n")
+	if trimmed == "" {
+		return ""
+	}
+	lines := strings.Split(trimmed, "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return strings.Join(lines, "\n") + "\n"
 }
 
 // parseCommandArgs splits a command string into args, respecting quotes.

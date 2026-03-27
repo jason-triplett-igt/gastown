@@ -1,6 +1,8 @@
 package doctor
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/events"
+	runtimepkg "github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -281,6 +284,9 @@ func (c *OrphanSessionCheck) isValidSession(sess string, validRigs []string, may
 // distinguish user sessions from orphaned Gas Town processes.
 type OrphanProcessCheck struct {
 	BaseCheck
+	tmuxPIDFinder    func() (map[int]bool, error)
+	processFinder    func() ([]processInfo, error)
+	managedPIDFinder func(string) (map[int]bool, error)
 }
 
 // NewOrphanProcessCheck creates a new orphan process check.
@@ -288,7 +294,7 @@ func NewOrphanProcessCheck() *OrphanProcessCheck {
 	return &OrphanProcessCheck{
 		BaseCheck: BaseCheck{
 			CheckName:        "orphan-processes",
-			CheckDescription: "Detect runtime processes outside tmux",
+			CheckDescription: "Detect unmanaged runtime processes outside tmux",
 			CheckCategory:    CategoryCleanup,
 		},
 	}
@@ -296,8 +302,12 @@ func NewOrphanProcessCheck() *OrphanProcessCheck {
 
 // Run checks for runtime processes running outside tmux.
 func (c *OrphanProcessCheck) Run(ctx *CheckContext) *CheckResult {
+	tmuxPIDFinder := c.tmuxPIDFinder
+	if tmuxPIDFinder == nil {
+		tmuxPIDFinder = c.getTmuxSessionPIDs
+	}
 	// Get list of tmux session PIDs
-	tmuxPIDs, err := c.getTmuxSessionPIDs()
+	tmuxPIDs, err := tmuxPIDFinder()
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -307,13 +317,31 @@ func (c *OrphanProcessCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	processFinder := c.processFinder
+	if processFinder == nil {
+		processFinder = c.findRuntimeProcesses
+	}
 	// Find runtime processes
-	runtimeProcs, err := c.findRuntimeProcesses()
+	runtimeProcs, err := processFinder()
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
 			Message: "Could not list runtime processes",
+			Details: []string{err.Error()},
+		}
+	}
+
+	managedPIDFinder := c.managedPIDFinder
+	if managedPIDFinder == nil {
+		managedPIDFinder = c.getManagedExternalProcessPIDs
+	}
+	managedPIDs, err := managedPIDFinder(ctx.TownRoot)
+	if err != nil {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: "Could not load managed external runtime state",
 			Details: []string{err.Error()},
 		}
 	}
@@ -329,8 +357,13 @@ func (c *OrphanProcessCheck) Run(ctx *CheckContext) *CheckResult {
 	// Check which runtime processes are outside tmux
 	var outsideTmux []processInfo
 	var insideTmux int
+	var managedExternal int
 
 	for _, proc := range runtimeProcs {
+		if managedPIDs[proc.pid] {
+			managedExternal++
+			continue
+		}
 		if c.isOrphanProcess(proc, tmuxPIDs) {
 			outsideTmux = append(outsideTmux, proc)
 		} else {
@@ -339,15 +372,22 @@ func (c *OrphanProcessCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	if len(outsideTmux) == 0 {
+		message := fmt.Sprintf("All %d runtime processes are inside tmux", insideTmux)
+		if managedExternal > 0 {
+			message = fmt.Sprintf("All %d runtime processes are inside tmux or managed externally", insideTmux+managedExternal)
+		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
-			Message: fmt.Sprintf("All %d runtime processes are inside tmux", insideTmux),
+			Message: message,
 		}
 	}
 
 	details := make([]string, 0, len(outsideTmux)+2)
 	details = append(details, "These may be your personal sessions or orphaned Gas Town processes.")
+	if managedExternal > 0 {
+		details = append(details, fmt.Sprintf("Ignored %d managed external runtime process(es) tracked by Gas Town.", managedExternal))
+	}
 	details = append(details, "Verify these are expected before manually killing any:")
 	for _, proc := range outsideTmux {
 		details = append(details, fmt.Sprintf("  PID %d: %s (parent: %d)", proc.pid, proc.cmd, proc.ppid))
@@ -359,6 +399,49 @@ func (c *OrphanProcessCheck) Run(ctx *CheckContext) *CheckResult {
 		Message: fmt.Sprintf("Found %d runtime process(es) running outside tmux", len(outsideTmux)),
 		Details: details,
 	}
+}
+
+func (c *OrphanProcessCheck) getManagedExternalProcessPIDs(townRoot string) (map[int]bool, error) {
+	pids := make(map[int]bool)
+	if strings.TrimSpace(townRoot) == "" {
+		return pids, nil
+	}
+
+	store := runtimepkg.NewFileSessionBindingStore(townRoot)
+	bindings, err := store.List(context.Background(), "", "")
+	if err == nil {
+		for _, binding := range bindings {
+			if !runtimepkg.IsExternalOwnerBinding(&binding) {
+				continue
+			}
+			if status, statusErr := runtimepkg.ReadExternalOwnerStatus(townRoot, binding.SessionName); statusErr == nil && status.OwnerPID > 0 {
+				pids[status.OwnerPID] = true
+				continue
+			}
+			if ownerPID := runtimepkg.OwnerPIDFromMetadata(binding.Metadata); ownerPID > 0 {
+				pids[ownerPID] = true
+			}
+		}
+	}
+
+	data, err := os.ReadFile(filepath.Join(townRoot, ".runtime", "copilot-server", "state.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return pids, nil
+		}
+		return pids, fmt.Errorf("reading copilot server state: %w", err)
+	}
+	var state struct {
+		PID     int  `json:"pid"`
+		Managed bool `json:"managed"`
+	}
+	if err := json.Unmarshal(data, &state); err != nil {
+		return pids, fmt.Errorf("parsing copilot server state: %w", err)
+	}
+	if state.Managed && state.PID > 0 {
+		pids[state.PID] = true
+	}
+	return pids, nil
 }
 
 type processInfo struct {
@@ -432,18 +515,8 @@ func (c *OrphanProcessCheck) findRuntimeProcesses() ([]processInfo, error) {
 			cmd = cmd[idx+1:]
 		}
 
-		// Only match claude/codex processes, not tmux or other launchers
-		// (tmux command line may contain --dangerously-skip-permissions as part of the launched command)
-		if cmd != "claude" && cmd != "claude-code" && cmd != "codex" {
-			continue
-		}
-
-		// Get full args
 		args := strings.Join(fields[2:], " ")
-
-		// Only match Gas Town Claude processes (have --dangerously-skip-permissions)
-		// This excludes user's personal Claude sessions
-		if !strings.Contains(args, "--dangerously-skip-permissions") {
+		if !isGasTownRuntimeProcess(cmd, args) {
 			continue
 		}
 
@@ -463,6 +536,23 @@ func (c *OrphanProcessCheck) findRuntimeProcesses() ([]processInfo, error) {
 	}
 
 	return procs, nil
+}
+
+func isGasTownRuntimeProcess(cmd, args string) bool {
+	cmd = strings.TrimSpace(filepath.Base(cmd))
+	args = strings.TrimSpace(args)
+	fields := strings.Fields(args)
+
+	switch cmd {
+	case "claude", "claude-code", "codex":
+		return strings.Contains(args, "--dangerously-skip-permissions")
+	case "copilot":
+		return strings.Contains(args, "--headless")
+	}
+	if len(fields) >= 2 && fields[1] == "external-copilot-owner" {
+		return true
+	}
+	return false
 }
 
 // isOrphanProcess checks if a runtime process is orphaned.

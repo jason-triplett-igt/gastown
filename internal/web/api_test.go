@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	runtimepkg "github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -1183,5 +1186,116 @@ func TestHandleSessionPreviewPrefixValidation(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHandleSessionPreviewFallsBackToExternalOwnerLog(t *testing.T) {
+	originalRegistry := session.DefaultRegistry()
+	t.Cleanup(func() { session.SetDefaultRegistry(originalRegistry) })
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	session.SetDefaultRegistry(reg)
+
+	townRoot := t.TempDir()
+	sessionName := "gt-refinery"
+	binding := runtimepkg.SessionBinding{
+		IssueID:          sessionName,
+		Role:             "refinery",
+		RigName:          "gastown",
+		AgentName:        "refinery",
+		Provider:         "copilot-external",
+		SessionName:      sessionName,
+		RuntimeSessionID: "runtime-xyz",
+		WorkDir:          filepath.Join(townRoot, "gastown", "refinery", "rig"),
+		Metadata:         runtimepkg.OwnerBindingMetadata(runtimepkg.ExternalOwnerDir(townRoot, sessionName), os.Getpid()),
+	}
+	if err := runtimepkg.NewFileSessionBindingStore(townRoot).Save(context.Background(), binding); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if err := os.MkdirAll(runtimepkg.ExternalOwnerDir(townRoot, sessionName), 0o755); err != nil {
+		t.Fatalf("MkdirAll(owner dir) error = %v", err)
+	}
+	logBody := strings.Join([]string{"line 1", "line 2", "line 3"}, "\n") + "\n"
+	if err := os.WriteFile(runtimepkg.ExternalOwnerLogPath(townRoot, sessionName), []byte(logBody), 0o644); err != nil {
+		t.Fatalf("WriteFile(owner.log) error = %v", err)
+	}
+
+	h := &APIHandler{workDir: townRoot, cmdSem: make(chan struct{}, 1)}
+	req := httptest.NewRequest(http.MethodGet, "/api/session-preview?session="+sessionName, nil)
+	rec := httptest.NewRecorder()
+
+	h.handleSessionPreview(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp SessionPreviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if resp.Session != sessionName {
+		t.Fatalf("Session = %q, want %q", resp.Session, sessionName)
+	}
+	if resp.Content != logBody {
+		t.Fatalf("Content = %q, want %q", resp.Content, logBody)
+	}
+}
+
+func TestHandleSessionPreviewFallsBackToExternalOwnerStatus(t *testing.T) {
+	originalRegistry := session.DefaultRegistry()
+	t.Cleanup(func() { session.SetDefaultRegistry(originalRegistry) })
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	session.SetDefaultRegistry(reg)
+
+	townRoot := t.TempDir()
+	sessionName := "gt-witness"
+	binding := runtimepkg.SessionBinding{
+		IssueID:          sessionName,
+		Role:             "witness",
+		RigName:          "gastown",
+		AgentName:        "witness",
+		Provider:         "copilot-external",
+		SessionName:      sessionName,
+		RuntimeSessionID: "runtime-degraded",
+		WorkDir:          filepath.Join(townRoot, "gastown", "witness"),
+		Metadata:         runtimepkg.OwnerBindingMetadata(runtimepkg.ExternalOwnerDir(townRoot, sessionName), os.Getpid()),
+	}
+	if err := runtimepkg.NewFileSessionBindingStore(townRoot).Save(context.Background(), binding); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if err := runtimepkg.WriteExternalOwnerStatus(townRoot, sessionName, runtimepkg.ExternalCopilotOwnerStatus{
+		OwnerPID:         os.Getpid(),
+		RuntimeSessionID: binding.RuntimeSessionID,
+		Ready:            runtimepkg.BoolPtr(false),
+		Busy:             true,
+		Error:            "owner degraded",
+		UpdatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("WriteExternalOwnerStatus() error = %v", err)
+	}
+
+	h := &APIHandler{workDir: townRoot, cmdSem: make(chan struct{}, 1)}
+	req := httptest.NewRequest(http.MethodGet, "/api/session-preview?session="+sessionName, nil)
+	rec := httptest.NewRecorder()
+
+	h.handleSessionPreview(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp SessionPreviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	for _, want := range []string{
+		"[headless external runtime]",
+		"runtime_session_id: runtime-degraded",
+		"busy: true",
+		"error: owner degraded",
+	} {
+		if !strings.Contains(resp.Content, want) {
+			t.Fatalf("Content = %q, want substring %q", resp.Content, want)
+		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/session"
@@ -93,9 +94,91 @@ func TestOrphanProcessCheck_MessageContent(t *testing.T) {
 	// Verify the check description is correct
 	check := NewOrphanProcessCheck()
 
-	expectedDesc := "Detect runtime processes outside tmux"
+	expectedDesc := "Detect unmanaged runtime processes outside tmux"
 	if check.Description() != expectedDesc {
 		t.Errorf("expected description %q, got %q", expectedDesc, check.Description())
+	}
+}
+
+func TestIsGasTownRuntimeProcess(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+		args string
+		want bool
+	}{
+		{name: "claude managed by gastown", cmd: "claude", args: "claude --dangerously-skip-permissions", want: true},
+		{name: "codex managed by gastown", cmd: "/usr/local/bin/codex", args: "codex --dangerously-skip-permissions", want: true},
+		{name: "personal claude ignored", cmd: "claude", args: "claude", want: false},
+		{name: "headless copilot server", cmd: "copilot", args: "copilot --headless --port 4321", want: true},
+		{name: "plain copilot ignored", cmd: "copilot", args: "copilot auth status", want: false},
+		{name: "external owner loop", cmd: "gt", args: "gt external-copilot-owner --config /tmp/owner.json", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isGasTownRuntimeProcess(tt.cmd, tt.args); got != tt.want {
+				t.Fatalf("isGasTownRuntimeProcess(%q, %q) = %v, want %v", tt.cmd, tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestOrphanProcessCheckRunIgnoresManagedExternalProcesses(t *testing.T) {
+	check := NewOrphanProcessCheck()
+	check.tmuxPIDFinder = func() (map[int]bool, error) {
+		return map[int]bool{100: true}, nil
+	}
+	check.processFinder = func() ([]processInfo, error) {
+		return []processInfo{
+			{pid: 2001, ppid: 1, cmd: "gt external-copilot-owner --config /tmp/owner.json"},
+			{pid: 2002, ppid: 1, cmd: "copilot --headless --port 4321"},
+		}, nil
+	}
+	check.managedPIDFinder = func(string) (map[int]bool, error) {
+		return map[int]bool{2001: true, 2002: true}, nil
+	}
+
+	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %v, want OK (%s)", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "managed externally") {
+		t.Fatalf("Message = %q, want managed externally", result.Message)
+	}
+}
+
+func TestOrphanProcessCheckRunReportsUnmanagedProcessesOnly(t *testing.T) {
+	check := NewOrphanProcessCheck()
+	check.tmuxPIDFinder = func() (map[int]bool, error) {
+		return map[int]bool{100: true}, nil
+	}
+	check.processFinder = func() ([]processInfo, error) {
+		return []processInfo{
+			{pid: 2001, ppid: 1, cmd: "gt external-copilot-owner --config /tmp/owner.json"},
+			{pid: 3001, ppid: 1, cmd: "claude --dangerously-skip-permissions"},
+		}, nil
+	}
+	check.managedPIDFinder = func(string) (map[int]bool, error) {
+		return map[int]bool{2001: true}, nil
+	}
+
+	result := check.Run(&CheckContext{TownRoot: t.TempDir()})
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want Warning (%s)", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "Found 1 runtime process(es) running outside tmux") {
+		t.Fatalf("Message = %q", result.Message)
+	}
+	joined := strings.Join(result.Details, "\n")
+	if !strings.Contains(joined, "Ignored 1 managed external runtime process(es) tracked by Gas Town.") {
+		t.Fatalf("Details missing managed external note: %v", result.Details)
+	}
+	if !strings.Contains(joined, "PID 3001") {
+		t.Fatalf("Details missing unmanaged PID: %v", result.Details)
+	}
+	if strings.Contains(joined, "PID 2001") {
+		t.Fatalf("Details should not mention managed PID 2001: %v", result.Details)
 	}
 }
 
