@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 type fakeRuntimeStarter struct {
@@ -148,6 +149,15 @@ func TestSessionAdapterUsesInjectedAdapter(t *testing.T) {
 	}
 }
 
+func setupWitnessTestRegistry(t *testing.T) {
+	t.Helper()
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	old := session.DefaultRegistry()
+	session.SetDefaultRegistry(reg)
+	t.Cleanup(func() { session.SetDefaultRegistry(old) })
+}
+
 func TestBuildReviewSessionScopeRequiresIssueID(t *testing.T) {
 	t.Parallel()
 	m := &Manager{rig: &rig.Rig{Name: "gastown", Path: t.TempDir()}}
@@ -223,6 +233,53 @@ func TestBuildReviewSessionScopeReturnsApprovedArtifactsAndReadOnlyTools(t *test
 	}
 	if got := config.RoleAllowedTools(root, rigPath, "witness"); !contains(got, "run_verification") {
 		t.Fatalf("RoleAllowedTools() = %#v", got)
+	}
+}
+
+func TestManager_IsHealthyUsesManagedWitnessBinding(t *testing.T) {
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	setupWitnessTestRegistry(t)
+	if err := os.MkdirAll(filepath.Join(root, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "mayor", "town.json"), []byte(`{"type":"town","name":"test-town","version":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, ".runtime"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, "witness"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{rig: &rig.Rig{Name: "gastown", Path: rigPath}}
+	if got := m.SessionName(); got != "gt-witness" {
+		t.Fatalf("SessionName() = %q, want gt-witness", got)
+	}
+	if got := m.townRoot(); got != root {
+		t.Fatalf("townRoot() = %q, want %q", got, root)
+	}
+	store := runtime.NewFileSessionBindingStore(root)
+	binding := runtime.SessionBinding{
+		IssueID:          m.SessionName(),
+		Role:             "witness",
+		RigName:          "gastown",
+		AgentName:        "witness",
+		Provider:         "copilot-external",
+		SessionName:      m.SessionName(),
+		RuntimeSessionID: "runtime-xyz",
+		WorkDir:          filepath.Join(rigPath, "witness"),
+	}
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatal(err)
+	}
+	m.adapter = &fakeRuntimeStarter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: true}}}
+	if got := m.IsHealthy(time.Minute); got != tmux.SessionHealthy {
+		t.Fatalf("IsHealthy() = %v, want SessionHealthy", got)
+	}
+	m.adapter = &fakeRuntimeStarter{session: &fakeManagedSession{status: runtime.SessionStatus{SessionID: "runtime-xyz", Alive: true, Ready: false}}}
+	if got := m.IsHealthy(time.Minute); got != tmux.SessionDead {
+		t.Fatalf("IsHealthy() = %v, want SessionDead when managed session not ready", got)
 	}
 }
 

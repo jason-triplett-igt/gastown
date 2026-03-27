@@ -149,7 +149,7 @@ test:
 # Requires GT_TEST_COPILOT_CLI_URL (or GT_EXTERNAL_COPILOT_CLI_URL) to point at
 # a running `copilot --headless` instance.
 test-e2e-agent-external-copilot:
-	go test -tags=integration ./internal/cmd -run 'TestExternalCopilotSessionSmoke|TestWitnessLifecycleWithExternalCopilot|TestRefineryLifecycleWithExternalCopilot' -count=1
+	GT_EXTERNAL_COPILOT_CLI_URL=$${GT_EXTERNAL_COPILOT_CLI_URL:-$${GT_TEST_COPILOT_CLI_URL}} go test -tags=integration ./internal/cmd -run 'TestExternalCopilotSessionSmoke|TestWitnessLifecycleWithExternalCopilot|TestRefineryLifecycleWithExternalCopilot' -count=1
 
 # Run e2e tests in isolated container (the only supported way to run them)
 test-e2e-container:

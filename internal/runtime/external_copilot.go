@@ -22,10 +22,11 @@ type externalSessionConnector interface {
 type copilotExternalSessionConnector struct{}
 
 var launchExternalOwnerProcess = LaunchExternalOwnerProcess
+var ensureCopilotServerForCLIURL = copilotutil.EnsureServerForCLIURL
 
 func (copilotExternalSessionConnector) Start(ctx context.Context, req SessionLaunchRequest, rc *config.RuntimeConfig, resolvedAgent string) (ManagedSession, error) {
 	if strings.Contains(strings.TrimSpace(rc.CLIURL), "127.0.0.1") || strings.Contains(strings.TrimSpace(rc.CLIURL), "localhost") {
-		if _, err := copilotutil.EnsureServer(ctx, req.TownRoot); err != nil {
+		if _, err := ensureCopilotServerForCLIURL(ctx, req.TownRoot, rc.CLIURL); err != nil {
 			return nil, err
 		}
 	}
@@ -79,7 +80,7 @@ func (copilotExternalSessionConnector) Start(ctx context.Context, req SessionLau
 
 func (copilotExternalSessionConnector) Resume(ctx context.Context, req SessionResumeRequest, rc *config.RuntimeConfig, resolvedAgent string) (ManagedSession, error) {
 	if strings.Contains(strings.TrimSpace(rc.CLIURL), "127.0.0.1") || strings.Contains(strings.TrimSpace(rc.CLIURL), "localhost") {
-		if _, err := copilotutil.EnsureServer(ctx, req.TownRoot); err != nil {
+		if _, err := ensureCopilotServerForCLIURL(ctx, req.TownRoot, rc.CLIURL); err != nil {
 			return nil, err
 		}
 	}

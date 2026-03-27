@@ -170,7 +170,11 @@ func setupExternalCopilotIntegrationWorkspace(t *testing.T, rigName string) (str
 	}
 
 	gtBinary := buildGT(t)
-	env := testutil.CleanGTEnv("HOME=" + homeDir)
+	env := testutil.CleanGTEnv(
+		"HOME="+homeDir,
+		"COPILOT_HOME=/home/dev",
+		"XDG_CONFIG_HOME=/home/dev/.config",
+	)
 	return townRoot, rigPath, gtBinary, env
 }
 

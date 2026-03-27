@@ -1,11 +1,17 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -225,9 +231,9 @@ func TestNudgeInvalidMode(t *testing.T) {
 	nudgeMessageFlag = "test"
 
 	tests := []struct {
-		name     string
-		mode     string
-		wantErr  string
+		name    string
+		mode    string
+		wantErr string
 	}{
 		{"bogus mode", "bogus", `invalid --mode "bogus"`},
 		{"empty mode", "", `invalid --mode ""`},
@@ -285,6 +291,50 @@ func TestNudgeInvalidPriority(t *testing.T) {
 				t.Errorf("got error %q, want to contain %q", err.Error(), tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestResolveNudgePatternIncludesManagedExternalSession(t *testing.T) {
+	setupNudgeTestRegistry(t)
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveTownConfig(filepath.Join(townRoot, "mayor", "town.json"), &config.TownConfig{Type: "town", Name: "test-town", Version: config.CurrentTownVersion}); err != nil {
+		t.Fatal(err)
+	}
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(filepath.Join(townRoot, "mayor")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	binding := runtime.SessionBinding{
+		IssueID:          "gt-witness",
+		Role:             "witness",
+		RigName:          "gastown",
+		AgentName:        "witness",
+		Provider:         "copilot-external",
+		SessionName:      "gt-witness",
+		RuntimeSessionID: "runtime-123",
+		Metadata:         map[string]string{"external_server": "true", "owner_mode": "copilot-queue"},
+	}
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	agents, err := getAgentSessions(false)
+	if err != nil {
+		t.Fatalf("getAgentSessions() error = %v", err)
+	}
+	got := resolveNudgePattern("gastown/witness", agents)
+	if len(got) != 1 || got[0] != "gt-witness" {
+		encoded, _ := json.Marshal(agents)
+		t.Fatalf("resolveNudgePattern() = %#v, want [gt-witness]; agents=%s", got, string(encoded))
 	}
 }
 

@@ -214,7 +214,7 @@ func (m *Manager) IsHealthy(maxInactivity time.Duration) tmux.ZombieStatus {
 	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
 		status, statusErr := managed.Status(context.Background())
 		if statusErr == nil {
-			if status.Alive {
+			if status.Alive && status.Ready {
 				return tmux.SessionHealthy
 			}
 			return tmux.SessionDead

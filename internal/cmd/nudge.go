@@ -577,12 +577,16 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		// the file is written but never drained.
 		// ACP sessions are always allowed as they use queue mode.
 		if nudgeModeFlag != NudgeModeImmediate && !hasACPSessionByName(townRoot, sessionName) {
-			exists, err := t.HasSession(sessionName)
-			if err != nil {
-				return fmt.Errorf("checking session: %w", err)
-			}
-			if !exists {
-				return fmt.Errorf("session %q not found (cannot queue nudge for nonexistent session)", sessionName)
+			if managed, _, managedErr := managedSessionForNudge(townRoot, sessionName); managedErr == nil && managed != nil {
+				// Managed external sessions do not require tmux presence for queued delivery.
+			} else {
+				exists, err := t.HasSession(sessionName)
+				if err != nil {
+					return fmt.Errorf("checking session: %w", err)
+				}
+				if !exists {
+					return fmt.Errorf("session %q not found (cannot queue nudge for nonexistent session)", sessionName)
+				}
 			}
 		}
 

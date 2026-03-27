@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/lock"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -186,9 +188,70 @@ func getAgentSessions(includePolecats bool) ([]*AgentSession, error) {
 	t := tmux.NewTmux()
 	sessions, err := t.ListSessions()
 	if err != nil {
-		return nil, err
+		sessions = nil
 	}
-	return filterAndSortSessions(sessions, includePolecats), nil
+	agents := filterAndSortSessions(sessions, includePolecats)
+	if townRoot, townErr := workspace.FindFromCwd(); townErr == nil && townRoot != "" {
+		agents = mergeManagedAgentSessions(townRoot, agents, includePolecats)
+	}
+	return agents, nil
+}
+
+func mergeManagedAgentSessions(townRoot string, agents []*AgentSession, includePolecats bool) []*AgentSession {
+	store := runtime.NewFileSessionBindingStore(townRoot)
+	bindings, err := store.List(context.Background(), "", "")
+	if err != nil || len(bindings) == 0 {
+		return agents
+	}
+	seen := make(map[string]bool, len(agents))
+	for _, agent := range agents {
+		if agent != nil {
+			seen[strings.TrimSpace(agent.Name)] = true
+		}
+	}
+	for _, binding := range bindings {
+		if strings.TrimSpace(binding.SessionName) == "" || strings.TrimSpace(binding.RuntimeSessionID) == "" {
+			continue
+		}
+		if !runtime.IsExternalOwnerBinding(&binding) {
+			continue
+		}
+		if seen[binding.SessionName] {
+			continue
+		}
+		agent := categorizeSession(binding.SessionName)
+		if agent == nil {
+			continue
+		}
+		if agent.Type == AgentPolecat && !includePolecats {
+			continue
+		}
+		seen[binding.SessionName] = true
+		agents = append(agents, agent)
+	}
+	sort.Slice(agents, func(i, j int) bool {
+		a, b := agents[i], agents[j]
+		if a.Type == AgentMayor {
+			return true
+		}
+		if b.Type == AgentMayor {
+			return false
+		}
+		if a.Type == AgentDeacon {
+			return true
+		}
+		if b.Type == AgentDeacon {
+			return false
+		}
+		if a.Rig != b.Rig {
+			return a.Rig < b.Rig
+		}
+		if rigTypeOrder[a.Type] != rigTypeOrder[b.Type] {
+			return rigTypeOrder[a.Type] < rigTypeOrder[b.Type]
+		}
+		return a.AgentName < b.AgentName
+	})
+	return agents
 }
 
 // socketGroup holds sessions for a single tmux socket.

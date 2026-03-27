@@ -57,3 +57,29 @@ func TestEnsureServerRejectsUnmanagedRemoteServer(t *testing.T) {
 		t.Fatalf("EnsureServer() error = %v, want unmanaged remote error", err)
 	}
 }
+
+func TestEnsureServerForCLIURLStartsLocalServerWithoutTownConfig(t *testing.T) {
+	t.Parallel()
+	oldStatus := statusServer
+	oldStart := startServer
+	t.Cleanup(func() {
+		statusServer = oldStatus
+		startServer = oldStart
+	})
+	statusServer = oldStatus
+	startServer = oldStart
+
+	status, err := EnsureServerForCLIURL(context.Background(), "/tmp/town", "http://127.0.0.1:4321")
+	if err == nil {
+		if status == nil || status.CLIURL != "http://127.0.0.1:4321" {
+			t.Fatalf("EnsureServerForCLIURL() status = %#v, want matching CLI URL", status)
+		}
+		return
+	}
+
+	// If the port is not actually listening in this environment, the helper still
+	// must not fail with the old town-config resolution error.
+	if strings.Contains(err.Error(), "town is not configured for copilot external") {
+		t.Fatalf("EnsureServerForCLIURL() error = %v, want explicit CLI URL path", err)
+	}
+}

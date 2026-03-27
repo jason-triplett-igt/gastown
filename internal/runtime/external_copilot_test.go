@@ -8,8 +8,53 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/copilotutil"
 	"github.com/steveyegge/gastown/internal/toolapi"
 )
+
+func TestExternalConnectorStartUsesExplicitCLIURLForLocalServer(t *testing.T) {
+	t.Parallel()
+	oldEnsure := ensureCopilotServerForCLIURL
+	oldLauncher := launchExternalOwnerProcess
+	t.Cleanup(func() {
+		ensureCopilotServerForCLIURL = oldEnsure
+		launchExternalOwnerProcess = oldLauncher
+	})
+
+	called := false
+	ensureCopilotServerForCLIURL = func(ctx context.Context, townRoot, cliURL string) (*copilotutil.ServerStatus, error) {
+		_ = ctx
+		_ = townRoot
+		if cliURL != "http://127.0.0.1:4321" {
+			t.Fatalf("cliURL = %q, want explicit local URL", cliURL)
+		}
+		called = true
+		return &copilotutil.ServerStatus{CLIURL: cliURL, Healthy: true, State: "running"}, nil
+	}
+
+	launchExternalOwnerProcess = func(ctx context.Context, cfg ExternalCopilotOwnerConfig) (*ExternalCopilotOwnerStatus, error) {
+		return &ExternalCopilotOwnerStatus{OwnerPID: 1234, RuntimeSessionID: "runtime-local", UpdatedAt: time.Now().UTC()}, nil
+	}
+
+	connector := copilotExternalSessionConnector{}
+	_, err := connector.Start(context.Background(), SessionLaunchRequest{
+		IssueID:     "smoke-1",
+		Role:        "witness",
+		SessionName: "smoke-session",
+		TownRoot:    t.TempDir(),
+		RigName:     "smokeext",
+		RigPath:     t.TempDir(),
+		AgentName:   "witness-smoke",
+		WorkDir:     t.TempDir(),
+		Prompt:      "READY",
+	}, &config.RuntimeConfig{CLIURL: "http://127.0.0.1:4321"}, "copilot-external")
+	if err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if !called {
+		t.Fatal("Start() did not verify explicit local CLI URL")
+	}
+}
 
 func TestExternalOwnerLookupForManagedBinding(t *testing.T) {
 	t.Parallel()

@@ -78,11 +78,30 @@ func EnsureServer(ctx context.Context, townRoot string) (*ServerStatus, error) {
 	return startServer(ctx, townRoot)
 }
 
+func EnsureServerForCLIURL(ctx context.Context, townRoot, cliURL string) (*ServerStatus, error) {
+	status, err := statusForCLIURL(townRoot, cliURL)
+	if err != nil {
+		return nil, err
+	}
+	if status.Healthy {
+		return status, nil
+	}
+	if !status.Managed && !IsManagedCLIURL(status.CLIURL) {
+		return nil, fmt.Errorf("copilot server at %s is unhealthy and not Gastown-managed", status.CLIURL)
+	}
+	return startForCLIURL(ctx, townRoot, cliURL)
+}
+
 func Start(ctx context.Context, townRoot string) (*ServerStatus, error) {
 	cliURL, err := ResolveCLIURLForTown(townRoot)
 	if err != nil {
 		return nil, err
 	}
+	return startForCLIURL(ctx, townRoot, cliURL)
+}
+
+func startForCLIURL(ctx context.Context, townRoot, cliURL string) (*ServerStatus, error) {
+	cliURL = strings.TrimSpace(cliURL)
 	if !IsManagedCLIURL(cliURL) {
 		return nil, fmt.Errorf("copilot server %s is not local; refusing to auto-start", cliURL)
 	}
@@ -136,6 +155,11 @@ func Stop(townRoot string) (*ServerStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	return stopForCLIURL(townRoot, cliURL)
+}
+
+func stopForCLIURL(townRoot, cliURL string) (*ServerStatus, error) {
+	cliURL = strings.TrimSpace(cliURL)
 	status := loadState(townRoot, cliURL)
 	if status.PID > 0 {
 		if proc, err := os.FindProcess(status.PID); err == nil {
@@ -153,6 +177,11 @@ func Status(townRoot string) (*ServerStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	return statusForCLIURL(townRoot, cliURL)
+}
+
+func statusForCLIURL(townRoot, cliURL string) (*ServerStatus, error) {
+	cliURL = strings.TrimSpace(cliURL)
 	status := loadState(townRoot, cliURL)
 	healthy, _ := health(cliURL)
 	status.Healthy = healthy

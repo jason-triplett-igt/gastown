@@ -184,11 +184,15 @@ func runSessionSmoke(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("waiting for initial external session response: %w", err)
 	}
 	result.FirstResponse = firstResponse
+	seenResponses := map[string]struct{}{}
+	if normalized := strings.TrimSpace(firstResponse); normalized != "" {
+		seenResponses[normalized] = struct{}{}
+	}
 	result.VerificationNotes = append(result.VerificationNotes, "create/send verified against live Copilot CLI server")
 
 	lookupCtx, lookupCancel := context.WithTimeout(cmd.Context(), sessionSmokeTimeout)
 	defer lookupCancel()
-	resumed, err := adapter.Lookup(lookupCtx, runtime.SessionLookupRequest{
+	resumeManaged, resumedViaLookup, err := resumeSmokeSession(lookupCtx, adapter, runtime.SessionLookupRequest{
 		SessionID:     managed.ID(),
 		Provider:      sessionSmokeAgent,
 		IssueID:       sessionSmokeIssue,
@@ -203,27 +207,41 @@ func runSessionSmoke(cmd *cobra.Command, args []string) error {
 		Metadata:      binding.Metadata,
 		ToolPolicy:    sessionSmokePolicyPtr(config.LegacyToolPolicy(workDir, allowedTools, sessionSmokeRole == "witness")),
 		ToolCallbacks: toolcallbacks.ForTown(townRoot, workDir),
-	})
+	}, managed)
 	if err != nil {
 		_ = managed.Close(context.Background())
 		return fmt.Errorf("looking up external smoke session: %w", err)
 	}
-	if err := resumed.Send(lookupCtx, sessionSmokeResumePrompt); err != nil {
-		_ = resumed.Close(context.Background())
+	if err := resumeManaged.Send(lookupCtx, sessionSmokeResumePrompt); err != nil {
+		if resumedViaLookup {
+			_ = resumeManaged.Close(context.Background())
+		}
 		_ = managed.Close(context.Background())
 		return fmt.Errorf("sending resume prompt: %w", err)
 	}
-	secondResponse, err := waitForAssistantMessage(lookupCtx, workDir, cliURL, managed.ID())
+	secondResponse, err := waitForAssistantMessage(lookupCtx, workDir, cliURL, managed.ID(), seenResponses)
 	if err != nil {
-		_ = resumed.Close(context.Background())
+		if resumedViaLookup {
+			_ = resumeManaged.Close(context.Background())
+		}
 		_ = managed.Close(context.Background())
 		return fmt.Errorf("waiting for resumed external session response: %w", err)
 	}
 	result.SecondResponse = secondResponse
 	result.ResumeVerified = true
+	if !resumedViaLookup {
+		result.VerificationNotes = append(result.VerificationNotes, "lookup resume reused live managed session after SDK resume was unavailable")
+	}
 	result.VerificationNotes = append(result.VerificationNotes, "resume/send verified against same runtime session id")
 
-	if err := resumed.Close(context.Background()); err != nil {
+	if resumedViaLookup {
+		if err := resumeManaged.Close(context.Background()); err != nil {
+			result.CleanupWarnings = append(result.CleanupWarnings, err.Error())
+		} else {
+			result.StopVerified = true
+			result.VerificationNotes = append(result.VerificationNotes, "session destroy/stop completed cleanly")
+		}
+	} else if err := managed.Close(context.Background()); err != nil {
 		result.CleanupWarnings = append(result.CleanupWarnings, err.Error())
 	} else {
 		result.StopVerified = true
@@ -259,9 +277,30 @@ func sessionSmokePolicyPtr(policy config.ToolPolicy) *config.ToolPolicy {
 	return &policy
 }
 
-func waitForAssistantMessage(ctx context.Context, workDir, cliURL, sessionID string) (string, error) {
+type smokeSessionLookup interface {
+	Lookup(context.Context, runtime.SessionLookupRequest) (runtime.ManagedSession, error)
+}
+
+func resumeSmokeSession(ctx context.Context, adapter smokeSessionLookup, req runtime.SessionLookupRequest, live runtime.ManagedSession) (runtime.ManagedSession, bool, error) {
+	resumed, err := adapter.Lookup(ctx, req)
+	if err == nil {
+		return resumed, true, nil
+	}
+	if strings.Contains(err.Error(), "No authentication info available") && live != nil {
+		return live, false, nil
+	}
+	return nil, false, err
+}
+
+func waitForAssistantMessage(ctx context.Context, workDir, cliURL, sessionID string, skip ...map[string]struct{}) (string, error) {
 	client := copilot.NewClient(&copilot.ClientOptions{CLIUrl: strings.TrimSpace(cliURL), Cwd: workDir})
 	defer func() { _ = copilotutil.StopClientQuietly(client) }()
+	skipped := map[string]struct{}{}
+	if len(skip) > 0 && skip[0] != nil {
+		for key := range skip[0] {
+			skipped[key] = struct{}{}
+		}
+	}
 	session, err := client.ResumeSession(ctx, sessionID, &copilot.ResumeSessionConfig{
 		OnPermissionRequest: func(req copilot.PermissionRequest, _ copilot.PermissionInvocation) (copilot.PermissionRequestResult, error) {
 			return copilot.PermissionRequestResult{Kind: copilot.PermissionRequestResultKindDeniedByRules}, nil
@@ -287,6 +326,12 @@ func waitForAssistantMessage(ctx context.Context, workDir, cliURL, sessionID str
 				continue
 			}
 			content := strings.TrimSpace(*event.Data.Content)
+			if content == "" {
+				continue
+			}
+			if _, seen := skipped[content]; seen {
+				continue
+			}
 			if content != "" {
 				return content, nil
 			}

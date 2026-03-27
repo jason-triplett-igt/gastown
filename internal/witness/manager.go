@@ -348,6 +348,15 @@ func (m *Manager) IsHealthy(maxInactivity time.Duration) tmux.ZombieStatus {
 	if state, err := m.lifecycleState(); err == nil && state == runtime.SessionLifecycleStopping {
 		return tmux.SessionDead
 	}
+	if managed, err := m.lookupManagedSession(m.SessionName()); err == nil && managed != nil {
+		status, statusErr := managed.Status(context.Background())
+		if statusErr == nil {
+			if status.Alive && status.Ready {
+				return tmux.SessionHealthy
+			}
+			return tmux.SessionDead
+		}
+	}
 	t := tmux.NewTmux()
 	return t.CheckSessionHealth(m.SessionName(), maxInactivity)
 }
