@@ -376,6 +376,7 @@ reference with examples and design rationale.
 
 - [dolt-storage.md](dolt-storage.md) - Dolt storage architecture
 - [mail-architecture.md](mail-architecture.md) - Mail storage, routing, delivery, and notification flow
+- [copilot-external-architecture.md](copilot-external-architecture.md) - Before/after architecture for owner-managed external Copilot sessions
 - [copilot-hook-payload-probe.md](copilot-hook-payload-probe.md) - Safe workflow for discovering Copilot hook payload shape
 - [reference.md](../reference.md) - Command reference
 - [directives-and-overlays.md](directives-and-overlays.md) - Directives and overlays reference

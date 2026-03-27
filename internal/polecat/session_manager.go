@@ -679,6 +679,57 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	if polecatGitBranch != "" {
 		envVarsToInject["GT_BRANCH"] = polecatGitBranch
 	}
+	resolvedToolPolicy := config.ResolveToolPolicyForSession(townRoot, m.rig.Path, "polecat", config.ToolSessionKindPatrol, workDir)
+	if usesExternalPolecatRuntime(runtimeConfig) {
+		prompt := beacon
+		if fallbackInfo != nil && fallbackInfo.SendBeaconNudge {
+			prompt = ""
+		}
+		managedSession, err := m.sessionAdapter().Start(context.Background(), runtime.SessionLaunchRequest{
+			Provider:             opts.Agent,
+			IssueID:              opts.Issue,
+			SessionName:          sessionID,
+			Role:                 "polecat",
+			SessionKind:          config.ToolSessionKindPatrol,
+			TownRoot:             townRoot,
+			RigName:              m.rig.Name,
+			RigPath:              m.rig.Path,
+			AgentName:            polecat,
+			WorkDir:              workDir,
+			Prompt:               prompt,
+			RuntimeConfigDir:     opts.RuntimeConfigDir,
+			AcceptStartupDialogs: true,
+			Env:                  envVarsToInject,
+			Metadata: map[string]string{
+				"session_kind": config.ToolSessionKindPatrol,
+			},
+			ToolPolicy:    polecatToolPolicyPtr(resolvedToolPolicy),
+			ToolCallbacks: toolcallbacks.ForTown(townRoot, workDir),
+		})
+		if err != nil {
+			return fmt.Errorf("starting polecat runtime session: %w", err)
+		}
+		if opts.Issue != "" {
+			agentID := fmt.Sprintf("%s/polecats/%s", m.rig.Name, polecat)
+			if err := m.hookIssue(opts.Issue, agentID, workDir); err != nil {
+				style.PrintWarning("could not hook issue %s: %v", opts.Issue, err)
+			}
+		}
+		if fallbackInfo != nil && fallbackInfo.SendBeaconNudge {
+			message := beacon
+			if fallbackInfo.SendStartupNudge && fallbackInfo.StartupNudgeDelayMs == 0 {
+				message = beacon + "\n\n" + runtime.StartupNudgeContent()
+			}
+			debugSession("ExternalSendBeacon", managedSession.Send(context.Background(), message))
+		}
+		if fallbackInfo != nil && fallbackInfo.SendStartupNudge && fallbackInfo.StartupNudgeDelayMs > 0 {
+			debugSession("ExternalStartupNudge", managedSession.Send(context.Background(), runtime.StartupNudgeContent()))
+		}
+		if fallbackInfo != nil && fallbackInfo.SendStartupNudge && fallbackInfo.StartupNudgeDelayMs == 0 && !fallbackInfo.SendBeaconNudge {
+			debugSession("ExternalImmediateStartupNudge", managedSession.Send(context.Background(), runtime.StartupNudgeContent()))
+		}
+		return nil
+	}
 	command = config.PrependEnv(command, envVarsToInject)
 
 	// Create session with command directly to avoid send-keys race condition.
@@ -915,6 +966,13 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func usesExternalPolecatRuntime(runtimeConfig *config.RuntimeConfig) bool {
+	if runtimeConfig == nil {
+		return false
+	}
+	return strings.TrimSpace(runtimeConfig.CLIURL) != ""
 }
 
 // isSessionStale checks if a tmux session's pane process has died.

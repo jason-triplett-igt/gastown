@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/nudge"
+	runtimepkg "github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/testutil"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -1768,6 +1770,58 @@ func TestNotifyRecipient_BusyAgentEscalationUsesUrgentQueuedNudge(t *testing.T) 
 	remaining, _ := nudge.Pending(townRoot, sessionName)
 	if remaining != 1 {
 		t.Fatalf("expected 1 deferred reply-reminder after draining escalation nudge, got %d", remaining)
+	}
+}
+
+func TestNotifyRecipient_ExternalOwnerBindingWithoutTmuxSession(t *testing.T) {
+	townRoot := t.TempDir()
+	sessionName := "gt-crew-external"
+	ownerDir := runtimepkg.ExternalOwnerDir(townRoot, sessionName)
+	if err := os.MkdirAll(ownerDir, 0o755); err != nil {
+		t.Fatalf("creating owner dir: %v", err)
+	}
+	store := runtimepkg.NewFileSessionBindingStore(townRoot)
+	binding := runtimepkg.SessionBinding{
+		IssueID:          "slotmachine-940",
+		Role:             "crew",
+		RigName:          "gastown",
+		AgentName:        "external",
+		Provider:         "copilot-external",
+		SessionName:      sessionName,
+		RuntimeSessionID: "runtime-123",
+		Metadata:         runtimepkg.OwnerBindingMetadata(ownerDir, 1234),
+	}
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	r := &Router{workDir: t.TempDir(), townRoot: townRoot, tmux: tmux.NewTmux()}
+	msg := &Message{From: "gastown/witness", To: "gastown/crew/external", Subject: "external notify"}
+	if err := r.notifyRecipient(msg); err != nil {
+		t.Fatalf("notifyRecipient() error = %v", err)
+	}
+	requests, err := runtimepkg.NextExternalOwnerRequests(townRoot, sessionName)
+	if err != nil {
+		t.Fatalf("NextExternalOwnerRequests() error = %v", err)
+	}
+	if len(requests) != 1 {
+		t.Fatalf("len(requests) = %d, want 1", len(requests))
+	}
+	request, err := runtimepkg.ReadExternalOwnerRequest(requests[0])
+	if err != nil {
+		t.Fatalf("ReadExternalOwnerRequest() error = %v", err)
+	}
+	if request.Kind != runtimepkg.ExternalOwnerRequestKindSend {
+		t.Fatalf("request.Kind = %q, want send", request.Kind)
+	}
+	if !strings.Contains(request.Message, "You have new mail from gastown/witness") {
+		t.Fatalf("request.Message = %q, want mail notification text", request.Message)
+	}
+	pending, err := nudge.Pending(townRoot, sessionName)
+	if err != nil {
+		t.Fatalf("Pending() error = %v", err)
+	}
+	if pending != 1 {
+		t.Fatalf("Pending() = %d, want 1 deferred reply reminder", pending)
 	}
 }
 

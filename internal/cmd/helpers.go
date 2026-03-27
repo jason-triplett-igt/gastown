@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
+	runtimepkg "github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -138,6 +140,54 @@ func attachToTmuxSession(sessionID string) error {
 
 	// Replace the Go process with tmux for direct terminal control
 	return syscall.Exec(tmuxPath, args, os.Environ())
+}
+
+func headlessManagedAttachMessage(townRoot, role, rigName, agentName, statusCommand string) (string, bool, error) {
+	binding, err := runtimepkg.NewFileSessionBindingStore(townRoot).Load(context.Background(), "", role, rigName, agentName)
+	if err != nil {
+		return "", false, fmt.Errorf("loading session binding: %w", err)
+	}
+	if binding == nil || strings.TrimSpace(binding.RuntimeSessionID) == "" {
+		return "", false, nil
+	}
+	if !bindingUsesExternalRuntime(binding) {
+		return "", false, nil
+	}
+
+	roleLabel := strings.TrimSpace(role)
+	if roleLabel == "" {
+		roleLabel = "agent"
+	}
+	roleLabel = strings.ToUpper(roleLabel[:1]) + roleLabel[1:]
+	statusCommand = strings.TrimSpace(statusCommand)
+	if statusCommand == "" {
+		statusCommand = fmt.Sprintf("gt %s status", strings.TrimSpace(role))
+	}
+
+	message := fmt.Sprintf("%s is running headlessly via external runtime; pane attach is unavailable. Use `%s` to monitor it.", roleLabel, statusCommand)
+	if runtimepkg.IsExternalOwnerBinding(binding) {
+		if discovery, err := runtimepkg.DiscoverExternalOwner(townRoot, binding); err == nil && discovery != nil {
+			if !discovery.OwnerAlive || !discovery.HeartbeatLive {
+				reason := strings.TrimSpace(discovery.Reason)
+				if reason == "" {
+					reason = "owner unavailable"
+				}
+				message = fmt.Sprintf("%s uses a headless external runtime; pane attach is unavailable. Owner state: %s. Use `%s` to monitor it.", roleLabel, reason, statusCommand)
+			}
+		}
+		message += fmt.Sprintf(" Owner log: %s", runtimepkg.ExternalOwnerLogPath(townRoot, binding.SessionName))
+	}
+	return message, true, nil
+}
+
+func bindingUsesExternalRuntime(binding *runtimepkg.SessionBinding) bool {
+	if binding == nil {
+		return false
+	}
+	if runtimepkg.IsExternalOwnerBinding(binding) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(binding.Metadata["external_server"]), "true")
 }
 
 // isShellCommand checks if the command is a shell (meaning the runtime has exited).

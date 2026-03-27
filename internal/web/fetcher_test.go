@@ -3,10 +3,12 @@ package web
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +17,233 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	runtimepkg "github.com/steveyegge/gastown/internal/runtime"
+	"github.com/steveyegge/gastown/internal/session"
 )
+
+func writeFetcherTestBD(t *testing.T, townRoot string, issues []struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Assignee string `json:"assignee"`
+}) string {
+	t.Helper()
+
+	issuesJSON, err := json.Marshal(issues)
+	if err != nil {
+		t.Fatalf("Marshal(issues) error = %v", err)
+	}
+
+	binDir := t.TempDir()
+	bdPath := filepath.Join(binDir, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  if [ "$1" = "list" ] && [ "$arg" = "--status=in_progress" ]; then
+    printf '%%s\n' '%s'
+    exit 0
+  fi
+done
+printf '[]\n'
+`, strings.ReplaceAll(string(issuesJSON), "'", "'\\''"))
+	if err := os.WriteFile(bdPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake bd: %v", err)
+	}
+	return bdPath
+}
+
+func setupWorkerFetcherExternalRuntime(t *testing.T, townRoot, rigName string) {
+	t.Helper()
+	oldRegistry := session.DefaultRegistry()
+	t.Cleanup(func() { session.SetDefaultRegistry(oldRegistry) })
+
+	if err := config.SaveRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"), &config.RigsConfig{
+		Version: config.CurrentRigsVersion,
+		Rigs: map[string]config.RigEntry{
+			rigName: {BeadsConfig: &config.BeadsConfig{Prefix: "gt", Repo: "local"}},
+		},
+	}); err != nil {
+		t.Fatalf("SaveRigsConfig() error = %v", err)
+	}
+
+	rigPath := filepath.Join(townRoot, rigName)
+	settings := config.NewRigSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{
+		"copilot-external": {
+			Provider: "copilot",
+			Command:  "copilot",
+			CLIURL:   "http://127.0.0.1:4321",
+		},
+	}
+	settings.RoleAgents = map[string]string{
+		constants.RolePolecat:  "copilot-external",
+		constants.RoleRefinery: "copilot-external",
+	}
+	if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(settings) error = %v", err)
+	}
+	if err := config.SaveRigSettings(filepath.Join(rigPath, "settings", "config.json"), settings); err != nil {
+		t.Fatalf("SaveRigSettings() error = %v", err)
+	}
+	if err := session.InitRegistry(townRoot); err != nil {
+		t.Fatalf("InitRegistry() error = %v", err)
+	}
+}
+
+func TestFetchWorkers_IncludesExternalOwnerBindingWithoutTmuxSession(t *testing.T) {
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+
+	townRoot := t.TempDir()
+	rigName := "gastown"
+	setupWorkerFetcherExternalRuntime(t, townRoot, rigName)
+
+	sessionName := "gt-toast"
+	pid := os.Getpid()
+	store := runtimepkg.NewFileSessionBindingStore(townRoot)
+	binding := runtimepkg.SessionBinding{
+		IssueID:          "slotmachine-123",
+		Role:             constants.RolePolecat,
+		RigName:          rigName,
+		AgentName:        "toast",
+		Provider:         "copilot-external",
+		SessionName:      sessionName,
+		RuntimeSessionID: "runtime-toast",
+		WorkDir:          filepath.Join(townRoot, rigName, "polecats", "toast"),
+		Metadata:         runtimepkg.OwnerBindingMetadata(runtimepkg.ExternalOwnerDir(townRoot, sessionName), pid),
+		UpdatedAt:        time.Now().UTC(),
+	}
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if err := runtimepkg.WriteExternalOwnerStatus(townRoot, sessionName, runtimepkg.ExternalCopilotOwnerStatus{
+		OwnerPID:         pid,
+		RuntimeSessionID: binding.RuntimeSessionID,
+		Ready:            runtimepkg.BoolPtr(true),
+		Busy:             true,
+		UpdatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("WriteExternalOwnerStatus() error = %v", err)
+	}
+
+	bdPath := writeFetcherTestBD(t, townRoot, []struct {
+		ID       string `json:"id"`
+		Title    string `json:"title"`
+		Assignee string `json:"assignee"`
+	}{
+		{ID: "slotmachine-123", Title: "Fix the dashboard", Assignee: "gastown/polecats/toast"},
+	})
+
+	f := &LiveConvoyFetcher{
+		townRoot:       townRoot,
+		bdBin:          bdPath,
+		cmdTimeout:     5 * time.Second,
+		tmuxCmdTimeout: 250 * time.Millisecond,
+		staleThreshold: 5 * time.Minute,
+		stuckThreshold: 30 * time.Minute,
+	}
+
+	workers, err := f.FetchWorkers()
+	if err != nil {
+		t.Fatalf("FetchWorkers() error = %v", err)
+	}
+	if len(workers) != 1 {
+		t.Fatalf("len(workers) = %d, want 1 (%#v)", len(workers), workers)
+	}
+
+	worker := workers[0]
+	if worker.Name != "toast" || worker.Rig != rigName || worker.SessionID != sessionName {
+		t.Fatalf("worker identity = %#v", worker)
+	}
+	if worker.AgentType != constants.RolePolecat {
+		t.Fatalf("AgentType = %q, want %q", worker.AgentType, constants.RolePolecat)
+	}
+	if worker.IssueID != "slotmachine-123" || worker.IssueTitle != "Fix the dashboard" {
+		t.Fatalf("issue = %q / %q, want assigned issue", worker.IssueID, worker.IssueTitle)
+	}
+	if worker.WorkStatus != "working" {
+		t.Fatalf("WorkStatus = %q, want %q", worker.WorkStatus, "working")
+	}
+	if worker.LastActivity.ColorClass == activity.ColorUnknown {
+		t.Fatalf("LastActivity = %#v, want recent external-owner activity", worker.LastActivity)
+	}
+	if worker.StatusHint != "" {
+		t.Fatalf("StatusHint = %q, want empty", worker.StatusHint)
+	}
+}
+
+func TestFetchWorkers_IncludesDegradedExternalOwnerBindingWithoutTmuxSession(t *testing.T) {
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+
+	townRoot := t.TempDir()
+	rigName := "gastown"
+	setupWorkerFetcherExternalRuntime(t, townRoot, rigName)
+
+	sessionName := "gt-nux"
+	pid := os.Getpid()
+	store := runtimepkg.NewFileSessionBindingStore(townRoot)
+	binding := runtimepkg.SessionBinding{
+		IssueID:          "slotmachine-456",
+		Role:             constants.RolePolecat,
+		RigName:          rigName,
+		AgentName:        "nux",
+		Provider:         "copilot-external",
+		SessionName:      sessionName,
+		RuntimeSessionID: "runtime-nux",
+		WorkDir:          filepath.Join(townRoot, rigName, "polecats", "nux"),
+		Metadata:         runtimepkg.OwnerBindingMetadata(runtimepkg.ExternalOwnerDir(townRoot, sessionName), pid),
+		UpdatedAt:        time.Now().UTC(),
+	}
+	if err := store.Save(context.Background(), binding); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	if err := runtimepkg.WriteExternalOwnerStatus(townRoot, sessionName, runtimepkg.ExternalCopilotOwnerStatus{
+		OwnerPID:         pid,
+		RuntimeSessionID: binding.RuntimeSessionID,
+		Ready:            runtimepkg.BoolPtr(false),
+		Busy:             true,
+		Error:            "owner degraded",
+		UpdatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("WriteExternalOwnerStatus() error = %v", err)
+	}
+
+	bdPath := writeFetcherTestBD(t, townRoot, []struct {
+		ID       string `json:"id"`
+		Title    string `json:"title"`
+		Assignee string `json:"assignee"`
+	}{
+		{ID: "slotmachine-456", Title: "Investigate degraded owner", Assignee: "gastown/polecats/nux"},
+	})
+
+	f := &LiveConvoyFetcher{
+		townRoot:       townRoot,
+		bdBin:          bdPath,
+		cmdTimeout:     5 * time.Second,
+		tmuxCmdTimeout: 250 * time.Millisecond,
+		staleThreshold: 5 * time.Minute,
+		stuckThreshold: 30 * time.Minute,
+	}
+
+	workers, err := f.FetchWorkers()
+	if err != nil {
+		t.Fatalf("FetchWorkers() error = %v", err)
+	}
+	sort.Slice(workers, func(i, j int) bool { return workers[i].Name < workers[j].Name })
+	if len(workers) != 1 {
+		t.Fatalf("len(workers) = %d, want 1 (%#v)", len(workers), workers)
+	}
+
+	worker := workers[0]
+	if worker.Name != "nux" {
+		t.Fatalf("Name = %q, want %q", worker.Name, "nux")
+	}
+	if worker.StatusHint != "External owner degraded" {
+		t.Fatalf("StatusHint = %q, want degraded hint", worker.StatusHint)
+	}
+	if worker.WorkStatus != "stale" {
+		t.Fatalf("WorkStatus = %q, want %q", worker.WorkStatus, "stale")
+	}
+	if worker.IssueID != "slotmachine-456" {
+		t.Fatalf("IssueID = %q, want %q", worker.IssueID, "slotmachine-456")
+	}
+}
 
 func TestCalculateWorkStatus(t *testing.T) {
 	tests := []struct {

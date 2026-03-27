@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/nudge"
+	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/telemetry"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -1675,6 +1676,13 @@ func (r *Router) notifyRecipient(msg *Message) error {
 	}
 	// No tmux session found - enqueue nudge for ACP/propeller delivery
 	// This handles headless ACP mode where there's no tmux session
+	if binding := r.externalOwnerBindingForSessions(sessionIDs); binding != nil {
+		notification := formatNotificationMessage(msg)
+		if err := runtime.SendExternalOwner(r.townRoot, binding, notification); err == nil {
+			r.enqueueReplyReminder(msg, binding.SessionName)
+			return nil
+		}
+	}
 	if r.townRoot != "" && len(sessionIDs) > 0 {
 		notification := formatNotificationMessage(msg)
 		return nudge.Enqueue(r.townRoot, sessionIDs[0], nudge.QueuedNudge{
@@ -1688,6 +1696,29 @@ func (r *Router) notifyRecipient(msg *Message) error {
 	}
 
 	return nil // No active session found
+}
+
+func (r *Router) externalOwnerBindingForSessions(sessionIDs []string) *runtime.SessionBinding {
+	if r == nil || r.townRoot == "" || len(sessionIDs) == 0 {
+		return nil
+	}
+	store := runtime.NewFileSessionBindingStore(r.townRoot)
+	bindings, err := store.List(context.Background(), "", "")
+	if err != nil {
+		return nil
+	}
+	for _, sessionID := range sessionIDs {
+		for i := range bindings {
+			binding := &bindings[i]
+			if strings.TrimSpace(binding.SessionName) != strings.TrimSpace(sessionID) {
+				continue
+			}
+			if runtime.IsExternalOwnerBinding(binding) {
+				return binding
+			}
+		}
+	}
+	return nil
 }
 
 func nudgeKindForMessage(msg *Message) string {

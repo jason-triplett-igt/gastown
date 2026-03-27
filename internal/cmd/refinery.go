@@ -546,6 +546,17 @@ func runRefineryAttach(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s Refinery started\n", style.Bold.Render("✓"))
 	}
 
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	if message, ok, err := headlessManagedAttachMessage(townRoot, "refinery", rigName, "refinery", fmt.Sprintf("gt refinery status %s", rigName)); err != nil {
+		return err
+	} else if ok {
+		fmt.Println(message)
+		return nil
+	}
+
 	// Attach to session using exec to properly forward TTY
 	return attachToTmuxSession(sessionID)
 }

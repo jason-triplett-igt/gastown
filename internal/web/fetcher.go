@@ -782,19 +782,19 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 
 	// Pre-fetch assigned issues map: assignee -> (issueID, title)
 	assignedIssues := f.getAssignedIssuesMap()
+	seenSessions := make(map[string]bool)
 
 	// Query all tmux sessions with window_activity for more accurate timing
 	stdout, err := runCmd(f.tmuxCmdTimeout, "tmux", "list-sessions", "-F", "#{session_name}|#{window_activity}")
-	if err != nil {
-		// tmux not running or no sessions
-		return nil, nil
-	}
 
 	// Pre-fetch merge queue count to determine refinery idle status
 	mergeQueueCount := f.getMergeQueueCount()
 
 	var workers []WorkerRow
-	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	var lines []string
+	if err == nil {
+		lines = strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	}
 
 	for _, line := range lines {
 		if line == "" {
@@ -864,6 +864,7 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 		// Calculate work status based on activity age and issue assignment
 		workStatus := calculateWorkerWorkStatus(activityAge, issueID, workerName, f.staleThreshold, f.stuckThreshold)
 
+		seenSessions[sessionName] = true
 		workers = append(workers, WorkerRow{
 			Name:         workerName,
 			Rig:          rig,
@@ -877,7 +878,108 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 		})
 	}
 
+	workers = append(workers, f.managedWorkerRows(registeredRigs, assignedIssues, mergeQueueCount, seenSessions)...)
+
 	return workers, nil
+}
+
+func (f *LiveConvoyFetcher) managedWorkerRows(registeredRigs map[string]bool, assignedIssues map[string]assignedIssue, mergeQueueCount int, seenSessions map[string]bool) []WorkerRow {
+	if f == nil {
+		return nil
+	}
+	store := runtimepkg.NewFileSessionBindingStore(f.townRoot)
+	bindings, err := store.List(context.Background(), "", "")
+	if err != nil || len(bindings) == 0 {
+		return nil
+	}
+
+	rows := make([]WorkerRow, 0, len(bindings))
+	for _, binding := range bindings {
+		sessionName := strings.TrimSpace(binding.SessionName)
+		if sessionName == "" || strings.TrimSpace(binding.RuntimeSessionID) == "" {
+			continue
+		}
+		if !runtimepkg.IsExternalOwnerBinding(&binding) || seenSessions[sessionName] {
+			continue
+		}
+
+		identity, err := session.ParseSessionName(sessionName)
+		if err != nil {
+			continue
+		}
+		if !registeredRigs[identity.Rig] {
+			continue
+		}
+		switch identity.Role {
+		case session.RoleMayor, session.RoleDeacon, session.RoleWitness:
+			continue
+		}
+
+		status, ok := f.managedSessionStatusForBinding(&binding)
+		if !ok || !status.Alive {
+			continue
+		}
+
+		workerName := identity.Name
+		agentType := constants.RolePolecat
+		if identity.Role == session.RoleRefinery {
+			agentType = constants.RoleRefinery
+		}
+
+		activityTime := f.managedWorkerActivityTime(&binding)
+		activityInfo := activity.Info{FormattedAge: "idle", ColorClass: activity.ColorUnknown}
+		activityAge := f.stuckThreshold
+		if !activityTime.IsZero() {
+			activityInfo = activity.Calculate(activityTime)
+			activityAge = time.Since(activityTime)
+		}
+
+		statusHint := ""
+		if workerName == "refinery" {
+			statusHint = f.getRefineryStatusHint(mergeQueueCount)
+		} else if !status.Ready {
+			statusHint = "External owner degraded"
+		}
+
+		assignee := fmt.Sprintf("%s/polecats/%s", identity.Rig, workerName)
+		var issueID, issueTitle string
+		if issue, ok := assignedIssues[assignee]; ok {
+			issueID = issue.ID
+			issueTitle = issue.Title
+		}
+
+		workStatus := calculateWorkerWorkStatus(activityAge, issueID, workerName, f.staleThreshold, f.stuckThreshold)
+		if !status.Ready && workerName != "refinery" && issueID != "" {
+			workStatus = "stale"
+		}
+
+		seenSessions[sessionName] = true
+		rows = append(rows, WorkerRow{
+			Name:         workerName,
+			Rig:          identity.Rig,
+			SessionID:    sessionName,
+			LastActivity: activityInfo,
+			StatusHint:   statusHint,
+			IssueID:      issueID,
+			IssueTitle:   issueTitle,
+			WorkStatus:   workStatus,
+			AgentType:    agentType,
+		})
+	}
+
+	return rows
+}
+
+func (f *LiveConvoyFetcher) managedWorkerActivityTime(binding *runtimepkg.SessionBinding) time.Time {
+	if f == nil || binding == nil {
+		return time.Time{}
+	}
+	if runtimepkg.IsExternalOwnerBinding(binding) {
+		if status, err := runtimepkg.ReadExternalOwnerStatus(f.townRoot, binding.SessionName); err == nil && !status.UpdatedAt.IsZero() {
+			return status.UpdatedAt
+		}
+	}
+	return binding.UpdatedAt
 }
 
 // assignedIssue holds issue info for the assigned issues map.
@@ -1483,6 +1585,14 @@ func (f *LiveConvoyFetcher) managedSessionStatusForRow(row SessionRow) (runtimep
 	if strings.TrimSpace(binding.SessionName) != strings.TrimSpace(row.Name) {
 		return runtimepkg.SessionStatus{}, false
 	}
+	return f.managedSessionStatusForBinding(binding)
+}
+
+func (f *LiveConvoyFetcher) managedSessionStatusForBinding(binding *runtimepkg.SessionBinding) (runtimepkg.SessionStatus, bool) {
+	if f == nil || binding == nil || strings.TrimSpace(binding.RuntimeSessionID) == "" {
+		return runtimepkg.SessionStatus{}, false
+	}
+	store := runtimepkg.NewFileSessionBindingStore(f.townRoot)
 	rigPath := ""
 	if strings.TrimSpace(binding.RigName) != "" {
 		rigPath = filepath.Join(f.townRoot, binding.RigName)

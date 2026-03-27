@@ -939,8 +939,24 @@ func TestSessionManagerResumeBoundExternalSessionPreservesIssueAndWorkdir(t *tes
 	root := t.TempDir()
 	rigPath := filepath.Join(root, "gastown")
 	workDir := filepath.Join(rigPath, "polecats", "toast")
+	settingsDir := filepath.Join(rigPath, "settings")
 	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		t.Fatal(err)
+	}
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := config.NewRigSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{
+		"copilot-external": {
+			Provider: "copilot",
+			Command:  "copilot",
+			CLIURL:   "http://127.0.0.1:4321",
+		},
+	}
+	settings.RoleAgents = map[string]string{"polecat": "copilot-external"}
+	if err := config.SaveRigSettings(filepath.Join(settingsDir, "config.json"), settings); err != nil {
+		t.Fatalf("SaveRigSettings() error = %v", err)
 	}
 	r := &rig.Rig{Name: "gastown", Path: rigPath, Polecats: []string{"toast"}}
 	managed := &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: true}}
@@ -974,6 +990,114 @@ func TestSessionManagerResumeBoundExternalSessionPreservesIssueAndWorkdir(t *tes
 	}
 	if adapter.resumeReq.SessionID != "runtime-123" {
 		t.Fatalf("resume runtime session id = %q, want runtime-123", adapter.resumeReq.SessionID)
+	}
+}
+
+func TestStartUsesManagedRuntimeForFreshExternalPolecat(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	workDir := filepath.Join(rigPath, "polecats", "toast")
+	settingsDir := filepath.Join(rigPath, "settings")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := config.NewRigSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{
+		"copilot-external": {
+			Provider: "copilot",
+			Command:  "copilot",
+			CLIURL:   "http://127.0.0.1:4321",
+		},
+	}
+	settings.RoleAgents = map[string]string{"polecat": "copilot-external"}
+	if err := config.SaveRigSettings(filepath.Join(settingsDir, "config.json"), settings); err != nil {
+		t.Fatalf("SaveRigSettings() error = %v", err)
+	}
+	r := &rig.Rig{Name: "gastown", Path: rigPath, Polecats: []string{"toast"}}
+	managed := &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: true}}
+	adapter := &fakeSessionAdapter{resumeSession: managed}
+	m := &SessionManager{tmux: tmux.NewTmux(), rig: r, adapter: adapter, bindings: &fakeBindingStore{}}
+
+	if err := m.Start("toast", SessionStartOptions{WorkDir: workDir}); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if adapter.startReq == nil {
+		t.Fatal("startReq = nil, want managed runtime start")
+	}
+	if adapter.startReq.Role != "polecat" || adapter.startReq.AgentName != "toast" {
+		t.Fatalf("startReq = %#v", adapter.startReq)
+	}
+	if adapter.startReq.SessionName != m.SessionName("toast") {
+		t.Fatalf("SessionName = %q, want %q", adapter.startReq.SessionName, m.SessionName("toast"))
+	}
+	if adapter.startReq.IssueID != "" {
+		t.Fatalf("IssueID = %q, want empty issue for fresh managed start", adapter.startReq.IssueID)
+	}
+	if adapter.startReq.WorkDir != workDir {
+		t.Fatalf("WorkDir = %q, want %q", adapter.startReq.WorkDir, workDir)
+	}
+	if adapter.startReq.ToolPolicy == nil || len(adapter.startReq.ToolPolicy.AvailableTools) == 0 {
+		t.Fatalf("ToolPolicy = %#v, want resolved policy", adapter.startReq.ToolPolicy)
+	}
+	if adapter.startReq.Metadata["session_kind"] != config.ToolSessionKindPatrol {
+		t.Fatalf("Metadata = %#v, want session_kind=patrol", adapter.startReq.Metadata)
+	}
+	if adapter.startReq.Env["GT_POLECAT"] != "toast" || adapter.startReq.Env["GT_RIG"] != "gastown" {
+		t.Fatalf("Env = %#v, want polecat identity env", adapter.startReq.Env)
+	}
+	if !strings.Contains(adapter.startReq.Prompt, "[GAS TOWN]") {
+		t.Fatalf("Prompt = %q, want startup beacon", adapter.startReq.Prompt)
+	}
+}
+
+func TestStartUsesManagedRuntimeWithPromptFallbackForNoPromptPolecat(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rigPath := filepath.Join(root, "gastown")
+	workDir := filepath.Join(rigPath, "polecats", "toast")
+	settingsDir := filepath.Join(rigPath, "settings")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := config.NewRigSettings()
+	settings.Agents = map[string]*config.RuntimeConfig{
+		"copilot-external": {
+			Provider:   "copilot",
+			Command:    "copilot",
+			CLIURL:     "http://127.0.0.1:4321",
+			PromptMode: "none",
+		},
+	}
+	settings.RoleAgents = map[string]string{"polecat": "copilot-external"}
+	if err := config.SaveRigSettings(filepath.Join(settingsDir, "config.json"), settings); err != nil {
+		t.Fatalf("SaveRigSettings() error = %v", err)
+	}
+	r := &rig.Rig{Name: "gastown", Path: rigPath, Polecats: []string{"toast"}}
+	managed := &fakeManagedSession{status: runtimepkg.SessionStatus{SessionID: "runtime-123", Alive: true, Ready: true}}
+	adapter := &fakeSessionAdapter{resumeSession: managed}
+	m := &SessionManager{tmux: tmux.NewTmux(), rig: r, adapter: adapter, bindings: &fakeBindingStore{}}
+
+	if err := m.Start("toast", SessionStartOptions{WorkDir: workDir}); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	if adapter.startReq == nil {
+		t.Fatal("startReq = nil, want managed runtime start")
+	}
+	if adapter.startReq.Prompt != "" {
+		t.Fatalf("Prompt = %q, want empty prompt for no-prompt runtime", adapter.startReq.Prompt)
+	}
+	if len(managed.messages) == 0 {
+		t.Fatal("messages = empty, want fallback beacon message")
+	}
+	if !strings.Contains(managed.messages[0], "[GAS TOWN]") {
+		t.Fatalf("messages = %#v, want startup beacon delivered via managed send", managed.messages)
 	}
 }
 

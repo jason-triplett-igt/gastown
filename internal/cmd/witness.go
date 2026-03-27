@@ -352,6 +352,17 @@ func runWitnessAttach(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Started witness session for %s\n", rigName)
 	}
 
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+	if message, ok, err := headlessManagedAttachMessage(townRoot, "witness", rigName, "witness", fmt.Sprintf("gt witness status %s", rigName)); err != nil {
+		return err
+	} else if ok {
+		fmt.Println(message)
+		return nil
+	}
+
 	// Attach to the session (socket-aware: uses the town's tmux socket).
 	return attachToTmuxSession(sessionName)
 }
